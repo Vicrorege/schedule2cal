@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import asyncio
 import logging
-import time
 from dataclasses import dataclass
 from datetime import date
 
@@ -13,9 +11,9 @@ from models.schedule import ClassList, DayOfWeek, Schedule
 from services.llm.base import LLMProvider
 from services.llm.key_pool import (
     GeminiKeyPool,
+    KeyCooldownRegistry,
     OpenAIEndpointPool,
-    cooldown_seconds_from_error,
-    is_quota_error,
+    _EndpointPool,
 )
 from services.llm.openai_provider import _extract_json
 from services.llm.prompts import DETECT_CLASSES_PROMPT, PARSE_SCHEDULE_PROMPT
@@ -28,6 +26,7 @@ class _Slot:
     kind: str  # "gemini" | "openai"
     index: int
     label: str
+    key_id: str
 
 
 class HybridLLMProvider(LLMProvider):
@@ -35,84 +34,42 @@ class HybridLLMProvider(LLMProvider):
 
     def __init__(self, settings: Settings):
         self._gemini_model = settings.gemini_model
+        self._registry = KeyCooldownRegistry()
         self._slots: list[_Slot] = []
         self._gemini_pool: GeminiKeyPool | None = None
         self._openai_pool: OpenAIEndpointPool | None = None
 
         if settings.gemini_native_keys:
             self._gemini_pool = GeminiKeyPool(
-                settings.gemini_native_keys, proxy=settings.proxy
+                settings.gemini_native_keys,
+                proxy=settings.proxy,
+                registry=self._registry,
             )
-            for i in range(self._gemini_pool.size):
-                self._slots.append(_Slot("gemini", i, f"gemini#{i + 1}"))
+            for i, key in enumerate(settings.gemini_native_keys):
+                self._slots.append(_Slot("gemini", i, f"gemini#{i + 1}", key))
 
         if settings.custom_endpoints:
             self._openai_pool = OpenAIEndpointPool(
                 settings.custom_endpoints,
                 proxy=settings.proxy,
                 default_model=settings.openai_model,
+                registry=self._registry,
             )
             for i, ep in enumerate(settings.custom_endpoints):
-                self._slots.append(_Slot("openai", i, ep.label()))
+                self._slots.append(_Slot("openai", i, ep.label(), ep.api_key))
 
         if not self._slots:
             raise ValueError("Hybrid pool пуст")
 
-        self._cooldown_until = [0.0] * len(self._slots)
-        self._rr = 0
-        self._lock = asyncio.Lock()
+        labels = [s.label for s in self._slots]
+        key_ids = [s.key_id for s in self._slots]
+        self._pool = _EndpointPool(labels, key_ids, registry=self._registry)
+
         logger.info(
-            "Hybrid LLM pool: %d слотов (gemini=%s, custom=%s)",
+            "Hybrid LLM pool: %d слотов, %d уник. ключей",
             len(self._slots),
-            self._gemini_pool.size if self._gemini_pool else 0,
-            self._openai_pool.size if self._openai_pool else 0,
+            len(dict.fromkeys(key_ids)),
         )
-
-    async def _pick(self, tried: set[int]) -> int | None:
-        now = time.time()
-        async with self._lock:
-            n = len(self._slots)
-            for offset in range(n):
-                idx = (self._rr + offset) % n
-                if idx in tried or self._cooldown_until[idx] > now:
-                    continue
-                self._rr = (idx + 1) % n
-                return idx
-            candidates = [i for i in range(n) if i not in tried]
-            if not candidates:
-                return None
-            return min(candidates, key=lambda i: self._cooldown_until[i])
-
-    async def _mark_cooldown(self, idx: int, seconds: float) -> None:
-        until = time.time() + seconds
-        async with self._lock:
-            self._cooldown_until[idx] = max(self._cooldown_until[idx], until)
-        logger.warning(
-            "Hybrid slot #%d (%s) cooldown %.0fs",
-            idx + 1,
-            self._slots[idx].label,
-            seconds,
-        )
-
-    async def _run_hybrid(self, call):
-        tried: set[int] = set()
-        last_exc: BaseException | None = None
-        while len(tried) < len(self._slots):
-            idx = await self._pick(tried)
-            if idx is None:
-                break
-            tried.add(idx)
-            try:
-                return await call(self._slots[idx])
-            except Exception as exc:
-                last_exc = exc
-                if is_quota_error(exc):
-                    await self._mark_cooldown(idx, cooldown_seconds_from_error(exc))
-                    continue
-                raise
-        raise RuntimeError(
-            f"Все LLM слоты исчерпали квоту ({len(self._slots)} шт.). Подожди или добавь ключи."
-        ) from last_exc
 
     async def _gemini_generate(self, slot: _Slot, *, schema, prompt: str, image_bytes: bytes):
         assert self._gemini_pool is not None
@@ -133,9 +90,7 @@ class HybridLLMProvider(LLMProvider):
 
         return await self._gemini_pool.call_at(slot.index, _call)
 
-    async def _openai_chat(
-        self, slot: _Slot, *, prompt: str, image_bytes: bytes
-    ) -> str:
+    async def _openai_chat(self, slot: _Slot, *, prompt: str, image_bytes: bytes) -> str:
         assert self._openai_pool is not None
         import base64
 
@@ -168,7 +123,8 @@ class HybridLLMProvider(LLMProvider):
     async def detect_classes(self, image_bytes: bytes) -> ClassList:
         prompt = DETECT_CLASSES_PROMPT.format(today=date.today().isoformat())
 
-        async def _call(slot: _Slot) -> ClassList:
+        async def _call(slot_idx: int) -> ClassList:
+            slot = self._slots[slot_idx]
             if slot.kind == "gemini":
                 response = await self._gemini_generate(
                     slot, schema=ClassList, prompt=prompt, image_bytes=image_bytes
@@ -177,7 +133,12 @@ class HybridLLMProvider(LLMProvider):
             raw = await self._openai_chat(slot, prompt=prompt, image_bytes=image_bytes)
             return ClassList.model_validate_json(raw)
 
-        return await self._run_hybrid(_call)
+        return await self._pool.run_with(
+            _call,
+            exhausted_message=(
+                f"Все LLM слоты исчерпали квоту ({len(dict.fromkeys(s.key_id for s in self._slots))} ключей)."
+            ),
+        )
 
     async def parse_schedule(
         self,
@@ -192,7 +153,8 @@ class HybridLLMProvider(LLMProvider):
             day_of_week=day_of_week,
         )
 
-        async def _call(slot: _Slot) -> Schedule:
+        async def _call(slot_idx: int) -> Schedule:
+            slot = self._slots[slot_idx]
             if slot.kind == "gemini":
                 response = await self._gemini_generate(
                     slot, schema=Schedule, prompt=prompt, image_bytes=image_bytes
@@ -207,4 +169,21 @@ class HybridLLMProvider(LLMProvider):
                 lesson.day_of_week = DayOfWeek(day_of_week)
             return result
 
-        return await self._run_hybrid(_call)
+        return await self._pool.run_with(
+            _call,
+            exhausted_message=(
+                f"Все LLM слоты исчерпали квоту ({len(dict.fromkeys(s.key_id for s in self._slots))} ключей)."
+            ),
+        )
+
+
+class _HybridPool:
+    """Тонкая обёртка: общий run_with для списка слотов hybrid."""
+
+    def __init__(self, labels: list[str], key_ids: list[str], *, registry: KeyCooldownRegistry):
+        from services.llm.key_pool import _EndpointPool
+
+        self._inner = _EndpointPool(labels, key_ids, registry=registry)
+
+    async def run_with(self, call, *, exhausted_message: str):
+        return await self._inner.run_with(call, exhausted_message=exhaust_message)
