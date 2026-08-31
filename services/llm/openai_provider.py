@@ -1,4 +1,3 @@
-import base64
 import logging
 import re
 from datetime import date
@@ -9,6 +8,7 @@ from bot.config import Settings
 from models.schedule import ClassList, DayOfWeek, Schedule
 from services.llm.base import LLMProvider
 from services.llm.key_pool import OpenAIEndpointPool
+from services.llm.openai_chat import chat_with_image
 from services.llm.prompts import DETECT_CLASSES_PROMPT, PARSE_SCHEDULE_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -72,29 +72,16 @@ class OpenAIProvider(LLMProvider):
         image_bytes: bytes,
         format_name: str,
         schema: dict,
-    ):
-        b64 = base64.standard_b64encode(image_bytes).decode()
-        if self._use_json_object:
-            prompt = prompt + "\n\nОтветь ТОЛЬКО валидным JSON-объектом, без markdown и пояснений."
-        response = await client.chat.completions.create(
-            model=model,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
-                        },
-                        {"type": "text", "text": prompt},
-                    ],
-                }
-            ],
+    ) -> str:
+        content = await chat_with_image(
+            client,
+            model,
+            prompt=prompt,
+            image_bytes=image_bytes,
             response_format=self._response_format(format_name, schema),
-            temperature=0.1,
+            json_object_hint=self._use_json_object,
         )
-        content = response.choices[0].message.content
-        return _extract_json(content or "")
+        return _extract_json(content)
 
     async def detect_classes(self, image_bytes: bytes) -> ClassList:
         prompt = DETECT_CLASSES_PROMPT.format(today=date.today().isoformat())

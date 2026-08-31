@@ -7,14 +7,17 @@ from pdf2image import convert_from_bytes
 
 logger = logging.getLogger(__name__)
 
-MAX_IMAGE_HEIGHT = 16000
-MAX_IMAGE_WIDTH = 4096
+MAX_IMAGE_HEIGHT = 12000
+MAX_IMAGE_WIDTH = 2048
 JPEG_QUALITY = 85
+# Лимит для base64 в JSON (nginx часто режет на ~1 MB body)
+MAX_LLM_IMAGE_BYTES = 700_000
+PDF_DPI = 150
 
 
 def pdf_to_image(pdf_bytes: bytes) -> bytes:
     """Конвертирует все страницы PDF в одно вертикально склеенное JPEG-изображение."""
-    pages = convert_from_bytes(pdf_bytes, dpi=200)
+    pages = convert_from_bytes(pdf_bytes, dpi=PDF_DPI)
     if not pages:
         raise ValueError("PDF не содержит страниц")
 
@@ -65,7 +68,52 @@ def process_upload(file_bytes: bytes, filename: str) -> bytes:
     raise ValueError(f"Неподдерживаемый формат файла: {ext}")
 
 
-def _image_to_jpeg_bytes(img: Image.Image) -> bytes:
+def fit_for_llm(image_bytes: bytes, max_bytes: int = MAX_LLM_IMAGE_BYTES) -> bytes:
+    """Сжимает JPEG, чтобы base64-пayload влез в лимит прокси."""
+    if len(image_bytes) <= max_bytes:
+        return image_bytes
+
+    img = Image.open(io.BytesIO(image_bytes))
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+
+    original = len(image_bytes)
+    scale = 1.0
+    quality = JPEG_QUALITY
+    best = image_bytes
+
+    for _ in range(24):
+        w, h = img.size
+        resized = img
+        if scale < 1.0:
+            resized = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
+        candidate = _image_to_jpeg_bytes(resized, quality=quality)
+        best = candidate
+        if len(candidate) <= max_bytes:
+            logger.info(
+                "Изображение сжато: %d → %d байт (scale=%.2f, q=%d)",
+                original,
+                len(candidate),
+                scale,
+                quality,
+            )
+            return candidate
+        if quality > 45:
+            quality -= 10
+        else:
+            scale *= 0.85
+            quality = JPEG_QUALITY
+
+    logger.warning(
+        "Изображение сжато до минимума: %d → %d байт (цель %d)",
+        original,
+        len(best),
+        max_bytes,
+    )
+    return best
+
+
+def _image_to_jpeg_bytes(img: Image.Image, *, quality: int = JPEG_QUALITY) -> bytes:
     buffer = io.BytesIO()
-    img.save(buffer, format="JPEG", quality=JPEG_QUALITY, optimize=True)
+    img.save(buffer, format="JPEG", quality=quality, optimize=True)
     return buffer.getvalue()

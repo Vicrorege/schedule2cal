@@ -23,7 +23,7 @@ from bot.states.schedule import ScheduleStates
 from db.database import Database
 from models.schedule import Schedule
 from services.caldav_client import sync_schedule_to_caldav
-from services.image_processor import process_upload
+from services.image_processor import fit_for_llm, process_upload
 from services.llm import create_llm_provider
 from services.schedule_formatter import format_schedule_preview
 from services.schedule_postprocess import (
@@ -108,7 +108,7 @@ async def _process_file(
         file = await message.bot.download(file_id)
         file_bytes = file.read()
 
-        image_bytes = process_upload(file_bytes, filename)
+        image_bytes = fit_for_llm(process_upload(file_bytes, filename))
         await state.update_data(image_bytes=image_bytes)
 
         await status_msg.edit_text("🔍 Ищу классы и дату в расписании...")

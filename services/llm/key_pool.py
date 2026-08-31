@@ -136,6 +136,17 @@ def is_quota_error(exc: BaseException) -> bool:
     )
 
 
+def is_failover_error(exc: BaseException) -> bool:
+    """Ошибки, при которых стоит переключиться на другой слот."""
+    if is_quota_error(exc):
+        return True
+    code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+    if code in {502, 503, 504}:
+        return True
+    text = str(exc).upper()
+    return "502 BAD GATEWAY" in text or "503 SERVICE" in text or "504 GATEWAY" in text
+
+
 class KeyCooldownRegistry:
     """Глобальный реестр убитых ключей (по api_key, не по слоту)."""
 
@@ -248,11 +259,13 @@ class _EndpointPool:
                 continue
             except Exception as exc:
                 last_exc = exc
-                if is_quota_error(exc):
+                if is_failover_error(exc):
                     cooldown = cooldown_seconds_from_error(exc)
+                    if not is_quota_error(exc):
+                        cooldown = min(cooldown, 120.0)
                     await self._mark_dead(idx, cooldown, reason=f"{type(exc).__name__} @ {endpoint}")
                     logger.info(
-                        "Квота на API [%s] — переключаюсь (живых ключей: %s)",
+                        "Ошибка на API [%s] — переключаюсь (живых ключей: %s)",
                         endpoint,
                         await self._registry.alive_count(list(dict.fromkeys(self._key_ids))),
                     )

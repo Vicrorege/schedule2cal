@@ -15,6 +15,7 @@ from services.llm.key_pool import (
     OpenAIEndpointPool,
     _EndpointPool,
 )
+from services.llm.openai_chat import chat_with_image
 from services.llm.openai_provider import _extract_json
 from services.llm.prompts import DETECT_CLASSES_PROMPT, PARSE_SCHEDULE_PROMPT
 
@@ -97,31 +98,16 @@ class HybridLLMProvider(LLMProvider):
 
     async def _openai_chat(self, slot: _Slot, *, prompt: str, image_bytes: bytes) -> str:
         assert self._openai_pool is not None
-        import base64
 
         async def _call(client, model: str) -> str:
-            b64 = base64.standard_b64encode(image_bytes).decode()
-            full_prompt = (
-                prompt + "\n\nОтветь ТОЛЬКО валидным JSON-объектом, без markdown и пояснений."
-            )
-            response = await client.chat.completions.create(
-                model=model,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
-                            },
-                            {"type": "text", "text": full_prompt},
-                        ],
-                    }
-                ],
+            content = await chat_with_image(
+                client,
+                model,
+                prompt=prompt,
+                image_bytes=image_bytes,
                 response_format={"type": "json_object"},
-                temperature=0.1,
             )
-            return _extract_json(response.choices[0].message.content or "")
+            return _extract_json(content)
 
         return await self._openai_pool.call_at(slot.index, _call)
 
