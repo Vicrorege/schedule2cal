@@ -23,7 +23,6 @@ class Settings(BaseSettings):
     llm_api_key: str
     llm_model: str = ""
 
-    semester_end_date: str = "2027-05-31"
     database_path: str = "data/schedule2cal.db"
 
     @property

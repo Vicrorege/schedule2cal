@@ -743,7 +743,7 @@ async def preview_cancel(callback: CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data == "preview:confirm")
-async def preview_confirm(callback: CallbackQuery, state: FSMContext, settings: Settings, db: Database):
+async def preview_confirm(callback: CallbackQuery, state: FSMContext, db: Database):
     schedule = await _load_schedule(state)
     if not schedule:
         await callback.answer("Сессия истекла", show_alert=True)
@@ -782,11 +782,6 @@ async def preview_confirm(callback: CallbackQuery, state: FSMContext, settings: 
     await callback.answer()
     await callback.message.edit_text("⏳ Записываю события в календарь SOGo…")
 
-    try:
-        semester_end = date.fromisoformat(settings.semester_end_date)
-    except ValueError:
-        semester_end = date(2027, 5, 31)
-
     result = await asyncio.to_thread(
         sync_schedule_to_caldav,
         creds,
@@ -795,7 +790,6 @@ async def preview_confirm(callback: CallbackQuery, state: FSMContext, settings: 
         template=prefs.title_template,
         aliases=aliases,
         bells=bells,
-        semester_end=semester_end,
     )
 
     # Пароль всегда стираем после попытки записи

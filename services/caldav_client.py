@@ -13,7 +13,7 @@ from caldav import DAVClient
 from caldav.lib.error import NotFoundError
 
 from db.database import BellPeriod, CalDavCredentials
-from models.schedule import DayOfWeek, Schedule, WeekType
+from models.schedule import Schedule
 from services.title_template import apply_title_template, resolve_lesson_name
 
 logger = logging.getLogger(__name__)
@@ -21,16 +21,6 @@ logger = logging.getLogger(__name__)
 BOT_MARKER = "schedule_bot_gen"
 UID_PREFIX = "schedbot_"
 DEFAULT_TZ = "Europe/Moscow"
-
-DOW_ICAL = {
-    DayOfWeek.MONDAY: "MO",
-    DayOfWeek.TUESDAY: "TU",
-    DayOfWeek.WEDNESDAY: "WE",
-    DayOfWeek.THURSDAY: "TH",
-    DayOfWeek.FRIDAY: "FR",
-    DayOfWeek.SATURDAY: "SA",
-    DayOfWeek.SUNDAY: "SU",
-}
 
 
 @dataclass
@@ -47,11 +37,6 @@ def _parse_hhmm(value: str) -> time:
     return time(int(h), int(m))
 
 
-def _until_utc(semester_end: date, tz: ZoneInfo) -> datetime:
-    local_end = datetime.combine(semester_end, time(23, 59, 59), tzinfo=tz)
-    return local_end.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
-
-
 def class_digest(user_id: int, class_name: str) -> str:
     return hashlib.sha1(f"{user_id}:{class_name}".encode()).hexdigest()[:10]
 
@@ -63,13 +48,6 @@ def _make_uid(user_id: int, class_name: str, lesson_number: int, week_type: str)
 
 def _class_tag(class_name: str) -> str:
     return f"class:{class_name}"
-
-
-def _build_rrule(week_type: WeekType, byday: str, until: datetime) -> dict:
-    # caldav/icalendar требуют datetime/date для UNTIL, не строку
-    if week_type == WeekType.ALL:
-        return {"FREQ": "WEEKLY", "BYDAY": byday, "UNTIL": until}
-    return {"FREQ": "WEEKLY", "INTERVAL": 2, "BYDAY": byday, "UNTIL": until}
 
 
 def _dav_root(url: str) -> str:
@@ -153,7 +131,6 @@ def sync_schedule_to_caldav(
     template: str,
     aliases: dict[str, str],
     bells: dict[int, BellPeriod],
-    semester_end: date,
     tz_name: str = DEFAULT_TZ,
 ) -> SyncResult:
     if not creds.is_complete:
@@ -164,7 +141,6 @@ def sync_schedule_to_caldav(
 
     schedule_date = date.fromisoformat(schedule.date)
     tz = ZoneInfo(tz_name)
-    until = _until_utc(semester_end, tz)
     tag = _class_tag(schedule.class_name)
     digest = class_digest(user_id, schedule.class_name)
     root = _dav_root(creds.url)
@@ -192,8 +168,6 @@ def sync_schedule_to_caldav(
                 uid = _make_uid(
                     user_id, schedule.class_name, lesson.lesson_number, lesson.week_type.value
                 )
-                byday = DOW_ICAL[lesson.day_of_week]
-                rrule = _build_rrule(lesson.week_type, byday, until)
 
                 description = (
                     f"Бот-идентификатор: {BOT_MARKER}\n"
@@ -210,7 +184,6 @@ def sync_schedule_to_caldav(
                     summary=summary,
                     uid=uid,
                     description=description,
-                    rrule=rrule,
                 )
                 created += 1
 
