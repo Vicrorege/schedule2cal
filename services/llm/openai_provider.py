@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 class OpenAIProvider(LLMProvider):
     def __init__(self, settings: Settings):
-        client_kwargs: dict = {"api_key": settings.llm_api_key}
+        client_kwargs: dict = {"api_key": settings.primary_api_key}
         if settings.proxy:
             client_kwargs["http_client"] = openai_http_client(settings.proxy)
             logger.info("OpenAI через прокси: %s", settings.proxy)

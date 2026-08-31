@@ -351,14 +351,11 @@ class Database:
         url: str | None = None,
         username: str | None = None,
         password: str | None = None,
-        clear_password: bool = False,
     ) -> CalDavCredentials:
         current = await self.get_caldav_credentials(user_id)
         new_url = url if url is not None else (current.url if current else "")
         new_user = username if username is not None else (current.username if current else "")
-        if clear_password:
-            new_pass = None
-        elif password is not None:
+        if password is not None:
             new_pass = password
         else:
             new_pass = current.password if current else None
@@ -384,14 +381,6 @@ class Database:
         return CalDavCredentials(
             user_id=user_id, url=new_url.strip(), username=new_user.strip(), password=new_pass
         )
-
-    async def clear_caldav_password(self, user_id: int) -> None:
-        async with aiosqlite.connect(self._path) as db:
-            await db.execute(
-                "UPDATE caldav_credentials SET password = NULL, updated_at = ? WHERE user_id = ?",
-                (datetime.now(timezone.utc).isoformat(), user_id),
-            )
-            await db.commit()
 
     async def delete_caldav_credentials(self, user_id: int) -> None:
         async with aiosqlite.connect(self._path) as db:

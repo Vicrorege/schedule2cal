@@ -195,9 +195,18 @@ async def _process_file(
                 remember=True,
             ),
         )
-    except Exception:
+    except Exception as exc:
         logger.exception("Ошибка обработки файла")
-        await status_msg.edit_text("❌ Ошибка при обработке файла. Попробуй ещё раз.")
+        detail = str(exc)
+        if "исчерпали квоту" in detail.casefold() or "RESOURCE_EXHAUSTED" in detail:
+            await status_msg.edit_text(
+                "❌ Лимит Gemini исчерпан на всех ключах пула.\n"
+                "Добавь ключи из других проектов в <code>LLM_API_KEY</code> "
+                "или подожди сброса квоты.",
+                parse_mode="HTML",
+            )
+        else:
+            await status_msg.edit_text("❌ Ошибка при обработке файла. Попробуй ещё раз.")
         await state.clear()
 
 async def _ensure_session(callback: CallbackQuery, state: FSMContext) -> dict | None:
@@ -523,9 +532,18 @@ async def _parse_and_preview(
                 return
 
         await _show_review(callback.message, state, db, callback.from_user.id, edit=True)
-    except Exception:
+    except Exception as exc:
         logger.exception("Ошибка парсинга расписания")
-        await callback.message.answer("❌ Ошибка при распознавании расписания. Попробуй ещё раз.")
+        detail = str(exc)
+        if "исчерпали квоту" in detail.casefold() or "RESOURCE_EXHAUSTED" in detail:
+            await callback.message.answer(
+                "❌ Лимит Gemini исчерпан на всех ключах пула.\n"
+                "Добавь ключи из других проектов или подожди сброса квоты."
+            )
+        else:
+            await callback.message.answer(
+                "❌ Ошибка при распознавании расписания. Попробуй ещё раз."
+            )
         await state.clear()
 
 
@@ -792,9 +810,6 @@ async def preview_confirm(callback: CallbackQuery, state: FSMContext, db: Databa
         bells=bells,
     )
 
-    # Пароль всегда стираем после попытки записи
-    await db.clear_caldav_password(callback.from_user.id)
-
     preview = format_calendar_events(
         schedule,
         template=prefs.title_template,
@@ -808,14 +823,12 @@ async def preview_confirm(callback: CallbackQuery, state: FSMContext, db: Databa
         status = (
             f"\n\n✅ <b>Записано в календарь</b>\n"
             f"Создано: {result.created}, удалено старых: {result.deleted}"
-            f"{cal_hint}\n"
-            "🔑 Пароль CalDAV стёрт из бота — перед следующей записью введи снова в /settings."
+            f"{cal_hint}"
         )
     else:
         status = (
             f"\n\n❌ <b>Не записано</b>\n"
-            f"Причина: <code>{result.error}</code>\n"
-            "🔑 Пароль CalDAV стёрт из бота."
+            f"Причина: <code>{result.error}</code>"
         )
 
     await callback.message.edit_text(preview + status, parse_mode="HTML")

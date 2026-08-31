@@ -51,7 +51,7 @@ async def format_settings_text(db: Database, user_id: int) -> str:
     elif creds.password:
         caldav_line = f"📅 CalDAV: <b>готов</b> ({creds.username})"
     else:
-        caldav_line = f"📅 CalDAV: URL/логин есть, <b>пароль очищен</b> ({creds.username})"
+        caldav_line = f"📅 CalDAV: URL/логин есть, <b>нет пароля</b> ({creds.username})"
 
     return (
         f"⚙️ <b>Настройки</b>\n\n"
@@ -311,17 +311,16 @@ def _caldav_status_text(creds) -> str:
             "Пример URL:\n"
             "<code>https://mail.example.com/SOGo/dav/user@example.com/Calendar/personal/</code>\n\n"
             "⚠️ Сообщения с паролем удаляются из чата сразу после ввода.\n"
-            "После записи в календарь пароль стирается из бота — его нужно ввести снова "
-            "(URL и логин остаются)."
+            "Пароль сохраняется в боте до удаления доступа в настройках."
         )
-    pwd = "задан" if creds.password else "очищен (нужно ввести снова)"
+    pwd = "задан" if creds.password else "не задан"
     return (
         "📅 <b>CalDAV / SOGo</b>\n\n"
         f"URL: <code>{creds.url}</code>\n"
         f"Логин: <code>{creds.username}</code>\n"
         f"Пароль: <b>{pwd}</b>\n\n"
         "⚠️ Сообщения с паролем удаляются из чата.\n"
-        "После успешной записи расписания пароль стирается из хранилища бота."
+        "Данные хранятся локально и не сбрасываются при рестарте."
     )
 
 
