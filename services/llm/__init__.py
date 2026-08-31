@@ -9,8 +9,14 @@ if TYPE_CHECKING:
 
 def create_llm_provider(settings: "Settings") -> "LLMProvider":
     from services.llm.gemini import GeminiProvider
+    from services.llm.hybrid_provider import HybridLLMProvider
     from services.llm.openai_provider import OpenAIProvider
 
-    if settings.llm_provider == "openai" or any(ep.base_url for ep in settings.llm_endpoints):
+    native = settings.gemini_native_keys
+    custom = settings.custom_endpoints
+
+    if native and custom:
+        return HybridLLMProvider(settings)
+    if custom or settings.llm_provider == "openai":
         return OpenAIProvider(settings)
     return GeminiProvider(settings)

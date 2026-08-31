@@ -166,6 +166,9 @@ class GeminiKeyPool(_EndpointPool):
             self._clients.append(genai.Client(**kwargs))
         logger.info("Gemini key pool: %d [%s]", len(api_keys), ", ".join(labels))
 
+    async def call_at(self, idx: int, call: Callable[[genai.Client], Awaitable[T]]) -> T:
+        return await call(self._clients[idx])
+
     async def run(self, call: Callable[[genai.Client], Awaitable[T]]) -> T:
         async def _inner(idx: int) -> T:
             return await call(self._clients[idx])
@@ -201,6 +204,11 @@ class OpenAIEndpointPool(_EndpointPool):
 
     def model_for(self, idx: int) -> str:
         return self._endpoints[idx].model or self._default_model
+
+    async def call_at(
+        self, idx: int, call: Callable[[AsyncOpenAI, str], Awaitable[T]]
+    ) -> T:
+        return await call(self._clients[idx], self.model_for(idx))
 
     async def run(self, call: Callable[[AsyncOpenAI, str], Awaitable[T]]) -> T:
         async def _inner(idx: int) -> T:

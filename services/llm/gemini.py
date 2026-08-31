@@ -14,7 +14,9 @@ logger = logging.getLogger(__name__)
 
 class GeminiProvider(LLMProvider):
     def __init__(self, settings: Settings):
-        keys = settings.gemini_api_keys
+        keys = settings.gemini_native_keys
+        if not keys:
+            raise ValueError("Нужен LLM_API_KEY для нативного Gemini")
         self._pool = GeminiKeyPool(keys, proxy=settings.proxy)
         self._model = settings.gemini_model
         if settings.proxy:

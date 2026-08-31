@@ -33,10 +33,12 @@ def _extract_json(text: str) -> str:
 
 
 class OpenAIProvider(LLMProvider):
-    """OpenAI API или любой OpenAI-compatible endpoint (base_url)."""
+    """OpenAI API или OpenAI-compatible endpoint (base_url)."""
 
     def __init__(self, settings: Settings):
-        endpoints = settings.openai_endpoints
+        endpoints = settings.custom_endpoints
+        if not endpoints:
+            raise ValueError("Нужен LLM_POOL или LLM_BASE_URL + LLM_API_KEY")
         self._pool = OpenAIEndpointPool(
             endpoints,
             proxy=settings.proxy,
