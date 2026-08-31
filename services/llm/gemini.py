@@ -17,7 +17,7 @@ class GeminiProvider(LLMProvider):
         keys = settings.gemini_native_keys
         if not keys:
             raise ValueError("Нужен LLM_API_KEY для нативного Gemini")
-        self._pool = GeminiKeyPool(keys, proxy=settings.proxy)
+        self._pool = GeminiKeyPool(keys, proxy=settings.proxy, model=settings.gemini_model)
         self._model = settings.gemini_model
         if settings.proxy:
             logger.info("Gemini через прокси: %s", settings.proxy)

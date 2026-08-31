@@ -232,17 +232,17 @@ class _EndpointPool:
             if idx is None:
                 break
             tried.add(idx)
-            key = self._key_ids[idx]
-            logger.debug("LLM slot #%d (%s)", idx + 1, self._labels[idx])
+            endpoint = self._labels[idx]
+            logger.info("LLM запрос → %s", endpoint)
             try:
                 return await asyncio.wait_for(call(idx), timeout=LLM_REQUEST_TIMEOUT_SEC)
             except TimeoutError as exc:
                 last_exc = exc
-                await self._mark_dead(idx, LLM_TIMEOUT_COOLDOWN_SEC, reason="timeout")
+                await self._mark_dead(idx, LLM_TIMEOUT_COOLDOWN_SEC, reason=f"timeout @ {endpoint}")
                 logger.warning(
-                    "Таймаут %s с на %s — переключаюсь (живых ключей: %s)",
+                    "Таймаут %s с на API [%s] — переключаюсь (живых ключей: %s)",
                     LLM_REQUEST_TIMEOUT_SEC,
-                    _mask_key(key),
+                    endpoint,
                     await self._registry.alive_count(list(dict.fromkeys(self._key_ids))),
                 )
                 continue
@@ -250,10 +250,10 @@ class _EndpointPool:
                 last_exc = exc
                 if is_quota_error(exc):
                     cooldown = cooldown_seconds_from_error(exc)
-                    await self._mark_dead(idx, cooldown, reason=type(exc).__name__)
+                    await self._mark_dead(idx, cooldown, reason=f"{type(exc).__name__} @ {endpoint}")
                     logger.info(
-                        "Квота на %s — переключаюсь (осталось живых ключей: %s)",
-                        _mask_key(key),
+                        "Квота на API [%s] — переключаюсь (живых ключей: %s)",
+                        endpoint,
                         await self._registry.alive_count(list(dict.fromkeys(self._key_ids))),
                     )
                     continue
@@ -274,10 +274,13 @@ class GeminiKeyPool(_EndpointPool):
         *,
         proxy: str = "",
         registry: KeyCooldownRegistry | None = None,
+        model: str = "gemini",
     ):
         if not api_keys:
             raise ValueError("Нужен хотя бы один Gemini API key")
-        labels = [_mask_key(k) for k in api_keys]
+        labels = [
+            f"generativelanguage.googleapis.com | {model} | {_mask_key(k)}" for k in api_keys
+        ]
         super().__init__(labels, api_keys, registry=registry)
         self._clients: list[genai.Client] = []
         for key in api_keys:

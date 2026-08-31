@@ -44,9 +44,14 @@ class HybridLLMProvider(LLMProvider):
                 settings.gemini_native_keys,
                 proxy=settings.proxy,
                 registry=self._registry,
+                model=settings.gemini_model,
             )
             for i, key in enumerate(settings.gemini_native_keys):
-                self._slots.append(_Slot("gemini", i, f"gemini#{i + 1}", key))
+                masked = key[:4] + "…" + key[-4:] if len(key) > 8 else "***"
+                label = (
+                    f"generativelanguage.googleapis.com | {settings.gemini_model} | {masked}"
+                )
+                self._slots.append(_Slot("gemini", i, label, key))
 
         if settings.custom_endpoints:
             self._openai_pool = OpenAIEndpointPool(
