@@ -19,6 +19,9 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
+LLM_REQUEST_TIMEOUT_SEC = 30
+LLM_TIMEOUT_COOLDOWN_SEC = 30
+
 _RETRY_IN_RE = re.compile(r"retry in\s+([\d.]+)\s*s", re.IGNORECASE)
 _DAILY_MARKERS = (
     "perday",
@@ -232,7 +235,17 @@ class _EndpointPool:
             key = self._key_ids[idx]
             logger.debug("LLM slot #%d (%s)", idx + 1, self._labels[idx])
             try:
-                return await call(idx)
+                return await asyncio.wait_for(call(idx), timeout=LLM_REQUEST_TIMEOUT_SEC)
+            except TimeoutError as exc:
+                last_exc = exc
+                await self._mark_dead(idx, LLM_TIMEOUT_COOLDOWN_SEC, reason="timeout")
+                logger.warning(
+                    "Таймаут %s с на %s — переключаюсь (живых ключей: %s)",
+                    LLM_REQUEST_TIMEOUT_SEC,
+                    _mask_key(key),
+                    await self._registry.alive_count(list(dict.fromkeys(self._key_ids))),
+                )
+                continue
             except Exception as exc:
                 last_exc = exc
                 if is_quota_error(exc):

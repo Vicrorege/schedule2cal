@@ -175,15 +175,3 @@ class HybridLLMProvider(LLMProvider):
                 f"Все LLM слоты исчерпали квоту ({len(dict.fromkeys(s.key_id for s in self._slots))} ключей)."
             ),
         )
-
-
-class _HybridPool:
-    """Тонкая обёртка: общий run_with для списка слотов hybrid."""
-
-    def __init__(self, labels: list[str], key_ids: list[str], *, registry: KeyCooldownRegistry):
-        from services.llm.key_pool import _EndpointPool
-
-        self._inner = _EndpointPool(labels, key_ids, registry=registry)
-
-    async def run_with(self, call, *, exhausted_message: str):
-        return await self._inner.run_with(call, exhausted_message=exhaust_message)
