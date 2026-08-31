@@ -5,6 +5,8 @@ from typing import Literal
 from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from services.llm.endpoints import LLMEndpoint, parse_endpoint_pool
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -20,22 +22,33 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("PROXY", "TELEGRAM_PROXY"),
     )
 
+    # gemini = Google GenAI SDK; openai = OpenAI / любой *-compatible base_url
     llm_provider: Literal["gemini", "openai"] = "gemini"
-    # Один ключ или несколько через запятую / перевод строки
     llm_api_key: str = ""
-    # Доп. пул (удобно не смешивать с одиночным LLM_API_KEY)
     llm_api_keys: str = Field(
         default="",
         validation_alias=AliasChoices("LLM_API_KEYS", "GEMINI_API_KEYS"),
     )
+    # Общий base URL для OpenAI-compatible (например https://host/v1)
+    llm_base_url: str = Field(
+        default="",
+        validation_alias=AliasChoices("LLM_BASE_URL", "OPENAI_BASE_URL"),
+    )
     llm_model: str = ""
+    # Пул слотов: key|base_url|model — по одному на строку или через ;
+    llm_pool: str = Field(
+        default="",
+        validation_alias=AliasChoices("LLM_POOL", "LLM_ENDPOINTS"),
+    )
 
     database_path: str = "data/schedule2cal.db"
 
     @model_validator(mode="after")
-    def _require_api_keys(self) -> "Settings":
-        if not self.api_keys:
-            raise ValueError("Задай LLM_API_KEY и/или LLM_API_KEYS")
+    def _require_endpoints(self) -> "Settings":
+        if not self.llm_endpoints:
+            raise ValueError(
+                "Задай LLM_POOL (key|url|model) и/или LLM_API_KEY (+ опционально LLM_BASE_URL)"
+            )
         return self
 
     @staticmethod
@@ -57,12 +70,34 @@ class Settings(BaseSettings):
         return self._split_keys(self.llm_api_key, self.llm_api_keys)
 
     @property
+    def llm_endpoints(self) -> list[LLMEndpoint]:
+        default_base = self.llm_base_url.strip().rstrip("/") or None
+        default_model = self.llm_model.strip() or None
+        pooled = parse_endpoint_pool(
+            self.llm_pool,
+            default_base_url=default_base,
+            default_model=default_model,
+        )
+        if pooled:
+            return pooled
+        return [
+            LLMEndpoint(api_key=key, base_url=default_base, model=default_model)
+            for key in self.api_keys
+        ]
+
+    @property
     def gemini_api_keys(self) -> list[str]:
-        return self.api_keys
+        # Для нативного Gemini — только ключи без кастомного base_url
+        keys = [ep.api_key for ep in self.llm_endpoints if not ep.base_url]
+        return keys or [ep.api_key for ep in self.llm_endpoints]
+
+    @property
+    def openai_endpoints(self) -> list[LLMEndpoint]:
+        return self.llm_endpoints
 
     @property
     def primary_api_key(self) -> str:
-        return self.api_keys[0]
+        return self.llm_endpoints[0].api_key
 
     @property
     def allowed_user_ids(self) -> set[int]:
@@ -76,6 +111,7 @@ class Settings(BaseSettings):
 
     @property
     def openai_model(self) -> str:
+        # Если в пуле у слотов свои model — это default fallback
         return self.llm_model or "gpt-4o-mini"
 
 

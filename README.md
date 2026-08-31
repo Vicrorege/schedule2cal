@@ -38,12 +38,14 @@ cp .env.example .env
 |---|---|
 | `BOT_TOKEN` | токен от [@BotFather](https://t.me/BotFather) |
 | `ALLOWED_USERS` | Telegram user id через запятую |
-| `LLM_PROVIDER` | `gemini` или `openai` |
-| `LLM_API_KEY` | ключ(и) API; для Gemini можно несколько через запятую |
-| `LLM_API_KEYS` | доп. пул ключей Gemini (через запятую) |
-| `PROXY` | опционально, SOCKS5 (например `socks5://127.0.0.1:10808`) |
+| `LLM_PROVIDER` | `gemini` или `openai` (OpenAI-compatible) |
+| `LLM_API_KEY` | ключ(и); для Gemini — через запятую |
+| `LLM_BASE_URL` | кастомный endpoint, например `https://host/v1` |
+| `LLM_MODEL` | модель по умолчанию |
+| `LLM_POOL` | пул слотов `key\|base_url\|model` (строки или `;`) |
+| `PROXY` | опционально, SOCKS5 |
 
-Для Gemini можно указать несколько ключей из **разных проектов** — при `429` бот переключится на следующий (cooldown на исчерпанный ключ).
+`LLM_POOL` перекрывает простой `LLM_API_KEY`. При `429` слот уходит в cooldown, берётся следующий. Если в пуле есть `base_url`, используется OpenAI-compatible клиент (даже при `LLM_PROVIDER=gemini`).
 
 ### 2. Локально
 
