@@ -85,33 +85,81 @@ def _split_rooms(room: str, count: int) -> list[str]:
         return [""] * count
 
     if "," in room:
-        parts = [p.strip() for p in room.split(",")]
+        parts = [p.strip() for p in room.split(",") if p.strip()]
     elif "/" in room:
-        parts = [p.strip() for p in room.split("/")]
+        parts = [p.strip() for p in room.split("/") if p.strip()]
+    elif "\n" in room:
+        parts = [p.strip() for p in room.splitlines() if p.strip()]
     else:
         parts = [room]
 
     while len(parts) < count:
-        parts.append(parts[-1])
+        parts.append(parts[-1] if parts else "")
     return parts[:count]
 
 
 def _is_paired_lesson(lesson: Lesson) -> bool:
-    return "/" in lesson.subject
+    return len(split_paired_subjects(lesson.subject)) >= 2
+
+
+def split_paired_subjects(subject: str) -> list[str]:
+    """Разбивает «Англ/Физика» или многострочный предмет на части."""
+    text = (subject or "").strip()
+    if not text:
+        return []
+    # вертикальная запись в ячейке → строки
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    if "\n" in text:
+        parts = [p.strip() for p in text.split("\n") if p.strip()]
+        if len(parts) >= 2:
+            return parts
+    # слэш / вертикальная черта / плюс как разделитель подгрупп
+    if any(sep in text for sep in ("/", "|", "+")):
+        parts = [p.strip() for p in re.split(r"[/|+]", text) if p.strip()]
+        if len(parts) >= 2:
+            return parts
+    return [text]
+
+
+def has_paired_lessons(schedule: Schedule) -> bool:
+    return any(_is_paired_lesson(lesson) for lesson in schedule.schedule)
+
+
+def normalize_paired_lessons(schedule: Schedule) -> Schedule:
+    """Приводит спаренные уроки к виду subject='A/B', room='101,102'."""
+    resolved: list[Lesson] = []
+    for lesson in schedule.schedule:
+        subjects = split_paired_subjects(lesson.subject)
+        if len(subjects) < 2:
+            resolved.append(lesson)
+            continue
+        rooms = _split_rooms(lesson.room or "", len(subjects))
+        room_value = ",".join(r for r in rooms if r) or None
+        resolved.append(
+            lesson.model_copy(
+                update={
+                    "subject": "/".join(subjects),
+                    "room": room_value,
+                    "subgroup": None,
+                }
+            )
+        )
+    return schedule.model_copy(update={"schedule": resolved})
 
 
 def apply_subgroup(schedule: Schedule, subgroup: int | None) -> Schedule:
     """Разрешает спаренные уроки: предмет и кабинет по индексу подгруппы."""
+    schedule = normalize_paired_lessons(schedule)
     if subgroup is None:
         return schedule
 
     resolved: list[Lesson] = []
     for lesson in schedule.schedule:
-        if not _is_paired_lesson(lesson):
+        subjects = split_paired_subjects(lesson.subject)
+        if len(subjects) < 2:
             resolved.append(lesson)
             continue
 
-        subjects = [s.strip() for s in lesson.subject.split("/") if s.strip()]
         rooms = _split_rooms(lesson.room or "", len(subjects))
         idx = min(subgroup - 1, len(subjects) - 1)
 
@@ -119,13 +167,47 @@ def apply_subgroup(schedule: Schedule, subgroup: int | None) -> Schedule:
             lesson.model_copy(
                 update={
                     "subject": subjects[idx],
-                    "room": rooms[idx],
+                    "room": rooms[idx] or None,
                     "subgroup": subgroup,
                 }
             )
         )
 
     return schedule.model_copy(update={"schedule": resolved})
+
+
+def format_lesson_subjects_plain(lesson: Lesson) -> str:
+    """Текст предмета без маркера подгруппы: для доп. классов оба варианта."""
+    subjects = split_paired_subjects(lesson.subject)
+    if len(subjects) < 2:
+        return lesson.subject
+    rooms = _split_rooms(lesson.room or "", len(subjects))
+    chunks: list[str] = []
+    for subject, room in zip(subjects, rooms):
+        if room:
+            chunks.append(f"{subject} ({room})")
+        else:
+            chunks.append(subject)
+    return " / ".join(chunks)
+
+
+def subjects_from_schedule(schedule: Schedule, *, expand_pairs: bool = False) -> list[str]:
+    """Уникальные предметы; expand_pairs=True режет A/B на отдельные имена."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for lesson in sorted(schedule.schedule, key=lambda x: x.lesson_number):
+        parts = (
+            split_paired_subjects(lesson.subject)
+            if expand_pairs
+            else [lesson.subject.strip()]
+        )
+        for part in parts:
+            key = part.strip()
+            if not key or key.casefold() in seen:
+                continue
+            seen.add(key.casefold())
+            result.append(key)
+    return result
 
 
 def find_saved_class(saved: str, detected: list[str]) -> str | None:

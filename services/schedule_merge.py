@@ -82,10 +82,10 @@ def build_calendar_event_plans(
 
 
 def format_extra_lesson_line(class_name: str, lesson: Lesson) -> str:
-    parts = [f"• {class_name}: {lesson.subject}"]
-    if lesson.room:
-        parts.append(f"каб. {lesson.room}")
-    return " ".join(parts)
+    """Строка доп. класса: без п.г., спаренные показываем оба предмета с кабинетами."""
+    from services.schedule_postprocess import format_lesson_subjects_plain
+
+    return f"• {class_name}: {format_lesson_subjects_plain(lesson)}"
 
 
 def format_merged_description_extras(extra_lessons: dict[str, Lesson]) -> str:

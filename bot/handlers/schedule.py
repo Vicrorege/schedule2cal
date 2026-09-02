@@ -34,13 +34,15 @@ from services.schedule_postprocess import (
     day_of_week_from_date,
     find_matching_extra_classes,
     find_saved_class,
+    has_paired_lessons,
     is_manual_class_selection,
+    normalize_paired_lessons,
     parse_caption_date,
     parse_iso_date,
+    subjects_from_schedule,
 )
 from services.title_template import (
     format_calendar_events,
-    subjects_needing_alias,
     suggest_aliases,
 )
 
@@ -359,7 +361,7 @@ async def handle_class_select(callback: CallbackQuery, state: FSMContext, db: Da
 
 
 @router.callback_query(F.data.startswith("subgroup:"))
-async def handle_subgroup_select(callback: CallbackQuery, state: FSMContext, db: Database):
+async def handle_subgroup_select(callback: CallbackQuery, state: FSMContext, settings: Settings, db: Database):
     data = await _ensure_session(callback, state)
     if data is None:
         return
@@ -373,7 +375,114 @@ async def handle_subgroup_select(callback: CallbackQuery, state: FSMContext, db:
     subgroup = None if subgroup_str == "skip" else int(subgroup_str)
     await state.update_data(selected_subgroup=subgroup)
     await callback.answer()
+
+    if data.get("pending_subgroup_resolve"):
+        await _resume_parse_after_subgroup(callback, state, settings, db, subgroup)
+        return
+
     await _continue_after_subgroup(callback, state, db, callback.from_user.id)
+
+
+async def _resume_parse_after_subgroup(
+    callback: CallbackQuery,
+    state: FSMContext,
+    settings: Settings,
+    db: Database,
+    subgroup: int | None,
+):
+    """Продолжение парсинга после выбора подгруппы на спаренных уроках."""
+    data = await state.get_data()
+    raw = data.get("schedule_json")
+    if not raw:
+        await callback.message.edit_text("Сессия истекла — отправь файл заново.")
+        await state.clear()
+        return
+
+    schedule = Schedule.model_validate(raw)
+    if subgroup is None and has_paired_lessons(schedule):
+        await callback.message.edit_text(
+            "Для спаренных уроков нужна подгруппа.\nВыбери 1 или 2:",
+            reply_markup=subgroup_keyboard(None),
+        )
+        await state.set_state(ScheduleStates.waiting_for_subgroup)
+        return
+
+    schedule = apply_subgroup(schedule, subgroup)
+    image_bytes = data["image_bytes"]
+    schedule_date = parse_iso_date(schedule.date) or parse_iso_date(data.get("selected_date"))
+    if not schedule_date:
+        await callback.message.edit_text("Дата потеряна — выбери на календаре.")
+        await _show_calendar(callback, state)
+        return
+
+    dow = day_of_week_from_date(schedule_date)
+    extra_class_names: list[str] = list(data.get("extra_classes") or [])
+    remember = bool(data.get("remember_class", True))
+    class_name = data.get("selected_class") or schedule.class_name
+
+    try:
+        llm = create_llm_provider(settings)
+        extra_schedules: dict[str, Schedule] = {}
+        for i, extra_name in enumerate(extra_class_names):
+            await callback.message.edit_text(
+                f"⏳ Распознаю доп. класс <b>{extra_name}</b> "
+                f"({i + 1}/{len(extra_class_names)})…",
+                parse_mode="HTML",
+            )
+            extra_schedule = await llm.parse_schedule(
+                image_bytes,
+                extra_name,
+                schedule_date,
+                dow.value,
+            )
+            extra_schedule = normalize_paired_lessons(extra_schedule)
+            extra_schedule.date = schedule_date.isoformat()
+            extra_schedules[extra_name] = extra_schedule
+
+        if remember:
+            await db.save_user_settings(callback.from_user.id, class_name, subgroup)
+
+        await state.update_data(
+            schedule_json=schedule.model_dump(mode="json"),
+            extra_schedules_json={
+                name: s.model_dump(mode="json") for name, s in extra_schedules.items()
+            },
+            selected_subgroup=subgroup,
+            pending_subgroup_resolve=False,
+            session_aliases={},
+            _user_id=callback.from_user.id,
+        )
+
+        prefs = await db.get_calendar_prefs(callback.from_user.id)
+        if prefs.custom_naming:
+            aliases = await db.get_lesson_aliases(callback.from_user.id)
+            pending: list[str] = []
+            seen: set[str] = set()
+            for subj in subjects_from_schedule(schedule, expand_pairs=False):
+                if subj.casefold() not in {k.casefold() for k in aliases} and subj.casefold() not in seen:
+                    seen.add(subj.casefold())
+                    pending.append(subj)
+            for sched in extra_schedules.values():
+                for subj in subjects_from_schedule(sched, expand_pairs=True):
+                    if subj.casefold() not in {k.casefold() for k in aliases} and subj.casefold() not in seen:
+                        seen.add(subj.casefold())
+                        pending.append(subj)
+            if pending:
+                await state.update_data(naming_queue=pending)
+                await state.set_state(ScheduleStates.naming_lessons)
+                await _ask_next_name(
+                    callback.message, state, db, callback.from_user.id, edit=True
+                )
+                return
+
+        await _show_review(callback.message, state, db, callback.from_user.id, edit=True)
+    except Exception:
+        logger.exception("Ошибка продолжения парсинга после подгруппы")
+        await state.set_state(ScheduleStates.waiting_for_date)
+        await callback.message.edit_text(
+            "❌ Ошибка при распознавании доп. классов.",
+            reply_markup=parse_retry_keyboard(),
+        )
 
 
 def _resolved_extra_classes(
@@ -770,8 +879,31 @@ async def _parse_and_preview(
                 schedule_date,
                 dow.value,
             )
-            schedule = apply_subgroup(schedule, subgroup)
+            schedule = normalize_paired_lessons(schedule)
             schedule.date = schedule_date.isoformat()
+
+            # Есть спаренные уроки, а подгруппу не выбрали — спросим перед именованием
+            if has_paired_lessons(schedule) and subgroup is None:
+                await state.update_data(
+                    schedule_json=schedule.model_dump(mode="json"),
+                    extra_schedules_json={},
+                    pending_subgroup_resolve=True,
+                    selected_subgroup=None,
+                    remember_class=remember,
+                )
+                # extras ещё не спарсили — сохраним флаг и сначала спросим подгруппу,
+                # потом повторим полный parse с подгруппой через parse:retry-подобное
+                await state.set_state(ScheduleStates.waiting_for_subgroup)
+                await callback.message.edit_text(
+                    f"📚 Класс: <b>{class_name}</b>\n\n"
+                    "В расписании есть спаренные уроки (через «/»).\n"
+                    "Укажи <b>свою подгруппу</b> — иначе предметы останутся склеенными.",
+                    parse_mode="HTML",
+                    reply_markup=subgroup_keyboard(None),
+                )
+                return
+
+            schedule = apply_subgroup(schedule, subgroup)
 
         extra_schedules: dict[str, Schedule] = {}
         for i, extra_name in enumerate(extra_class_names):
@@ -792,6 +924,8 @@ async def _parse_and_preview(
                 schedule_date,
                 dow.value,
             )
+            # доп. классы — без подгрупп: оставляем оба предмета A/B
+            extra_schedule = normalize_paired_lessons(extra_schedule)
             extra_schedule.date = schedule_date.isoformat()
             extra_schedules[extra_name] = extra_schedule
 
@@ -805,6 +939,7 @@ async def _parse_and_preview(
             },
             selected_subgroup=subgroup,
             session_aliases={},
+            pending_subgroup_resolve=False,
             _user_id=callback.from_user.id,
         )
 
@@ -813,12 +948,25 @@ async def _parse_and_preview(
             aliases = await db.get_lesson_aliases(callback.from_user.id)
             pending: list[str] = []
             seen_subjects: set[str] = set()
-            for sched in [schedule, *extra_schedules.values()]:
-                for subj in subjects_needing_alias(sched, aliases):
+
+            # основной — уже с разрезанной подгруппой
+            for subj in subjects_from_schedule(schedule, expand_pairs=False):
+                if subj.casefold() not in {k.casefold() for k in aliases}:
                     key = subj.casefold()
                     if key not in seen_subjects:
                         seen_subjects.add(key)
                         pending.append(subj)
+
+            # доп. классы — без подгрупп: именуем каждый предмет из пары отдельно
+            for sched in extra_schedules.values():
+                for subj in subjects_from_schedule(sched, expand_pairs=True):
+                    if subj.casefold() in {k.casefold() for k in aliases}:
+                        continue
+                    key = subj.casefold()
+                    if key not in seen_subjects:
+                        seen_subjects.add(key)
+                        pending.append(subj)
+
             if pending:
                 await state.update_data(naming_queue=pending)
                 await state.set_state(ScheduleStates.naming_lessons)

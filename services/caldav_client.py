@@ -21,7 +21,11 @@ from services.schedule_merge import (
     merge_main_schedule_with_existing,
 )
 from services.schedule_postprocess import day_of_week_from_date
-from services.title_template import apply_title_template, resolve_lesson_name
+from services.title_template import (
+    apply_title_template,
+    resolve_lesson_name,
+    resolve_paired_lesson_label,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -414,9 +418,8 @@ def sync_schedule_to_caldav(
                 if plan.is_extra_only:
                     extra_name = plan.extra_class_name or next(iter(plan.extra_lessons))
                     lesson = plan.extra_lessons[extra_name]
-                    lesson_name = resolve_lesson_name(lesson.subject, aliases)
-                    room_part = f" ({lesson.room})" if lesson.room else ""
-                    summary = f"🔸 ДОП. КЛАСС | {extra_name}: {lesson_name}{room_part}"
+                    lesson_label = resolve_paired_lesson_label(lesson, aliases)
+                    summary = f"🔸 ДОП. КЛАСС | {extra_name}: {lesson_label}"
                     uid = _make_uid(
                         user_id,
                         extra_name,
@@ -434,7 +437,7 @@ def sync_schedule_to_caldav(
                         f"⚠️ Урок дополнительного класса (у основного класса окно)\n"
                         f"Основной класс: {schedule.class_name}\n"
                         f"Доп. класс: {extra_name}\n"
-                        f"Предмет: {lesson.subject}\n"
+                        f"Предмет: {lesson_label}\n"
                         f"Урок: {lesson.lesson_number}"
                     )
                     if lesson.room:

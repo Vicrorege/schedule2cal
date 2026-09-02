@@ -58,6 +58,26 @@ def resolve_lesson_name(subject: str, aliases: dict[str, str]) -> str:
     return lower.get(subject.casefold(), subject)
 
 
+def resolve_paired_lesson_label(lesson, aliases: dict[str, str]) -> str:
+    """Подпись предмета; для A/B — оба через « / » с алиасами, без п.г."""
+    from services.schedule_postprocess import format_lesson_subjects_plain, split_paired_subjects
+
+    subjects = split_paired_subjects(lesson.subject)
+    if len(subjects) < 2:
+        name = resolve_lesson_name(lesson.subject, aliases)
+        return f"{name} ({lesson.room})" if lesson.room else name
+
+    # пересобираем с алиасами
+    from services.schedule_postprocess import _split_rooms
+
+    rooms = _split_rooms(lesson.room or "", len(subjects))
+    chunks: list[str] = []
+    for subject, room in zip(subjects, rooms):
+        name = resolve_lesson_name(subject, aliases)
+        chunks.append(f"{name} ({room})" if room else name)
+    return " / ".join(chunks)
+
+
 def unique_subjects(schedule: Schedule) -> list[str]:
     seen: set[str] = set()
     result: list[str] = []
@@ -134,7 +154,7 @@ def format_calendar_events(
         if plan.is_extra_only:
             extra_name = plan.extra_class_name or "?"
             lesson = next(iter(plan.extra_lessons.values()))
-            name = resolve_lesson_name(lesson.subject, aliases)
+            name = resolve_paired_lesson_label(lesson, aliases)
             lines.append(f"<b>{plan.lesson_number}.</b> ⏰ {time_part}")
             lines.append(
                 f"   🔸 <code>ДОП. КЛАСС | {_esc(extra_name)}: {_esc(name)}</code> (private)"
