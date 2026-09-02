@@ -15,6 +15,7 @@ from services.llm.prompts import (
     wrap_homework_user_text,
 )
 from services.schedule_postprocess import WEEKDAY_RU, day_of_week_from_date
+from services.schedule_normalize import normalize_schedule_payload
 
 logger = logging.getLogger(__name__)
 
@@ -77,12 +78,12 @@ class GeminiProvider(LLMProvider):
             )
 
         response = await self._pool.run(_call)
-        result = Schedule.model_validate_json(response.text)
-        result.class_name = class_name
-        result.date = schedule_date.isoformat()
-        for lesson in result.schedule:
-            lesson.day_of_week = DayOfWeek(day_of_week)
-        return result
+        return normalize_schedule_payload(
+            response.text,
+            class_name=class_name,
+            schedule_date=schedule_date.isoformat(),
+            day_of_week=day_of_week,
+        )
 
     async def parse_homework(self, text: str, *, today: date) -> HomeworkParseResult:
         system = PARSE_HOMEWORK_SYSTEM.format(

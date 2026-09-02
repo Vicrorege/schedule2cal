@@ -144,7 +144,7 @@ def is_failover_error(exc: BaseException) -> bool:
     if code in {500, 502, 503, 504}:
         return True
     name = type(exc).__name__
-    if name in {"ServerError", "APIConnectionError", "APITimeoutError", "InternalServerError"}:
+    if name in {"ServerError", "APIConnectionError", "APITimeoutError", "InternalServerError", "ValidationError"}:
         return True
     text = str(exc).upper()
     return (
@@ -153,6 +153,7 @@ def is_failover_error(exc: BaseException) -> bool:
         or "504 GATEWAY" in text
         or "INTERNAL ERROR" in text
         or "UNAVAILABLE" in text
+        or "VALIDATION ERROR" in text
     )
 
 
@@ -269,9 +270,13 @@ class _EndpointPool:
             except Exception as exc:
                 last_exc = exc
                 if is_failover_error(exc):
-                    cooldown = cooldown_seconds_from_error(exc)
-                    if not is_quota_error(exc):
-                        cooldown = min(cooldown, 120.0)
+                    # кривой JSON — не убиваем ключ надолго, просто пробуем другой слот
+                    if type(exc).__name__ == "ValidationError" or "validation error" in str(exc).casefold():
+                        cooldown = 1.0
+                    else:
+                        cooldown = cooldown_seconds_from_error(exc)
+                        if not is_quota_error(exc):
+                            cooldown = min(cooldown, 120.0)
                     await self._mark_dead(idx, cooldown, reason=f"{type(exc).__name__} @ {endpoint}")
                     logger.info(
                         "Ошибка на API [%s] — переключаюсь (живых ключей: %s)",

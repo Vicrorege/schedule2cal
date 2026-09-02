@@ -15,6 +15,7 @@ from bot.keyboards.class_select import (
 )
 from bot.keyboards.extra_classes import extra_classes_keyboard
 from bot.keyboards.preview import (
+    parse_retry_keyboard,
     preview_delete_keyboard,
     preview_edit_cancel_keyboard,
     preview_keyboard,
@@ -770,17 +771,74 @@ async def _parse_and_preview(
     except Exception as exc:
         logger.exception("Ошибка парсинга расписания")
         detail = str(exc)
+        # сессию не чистим — можно повторить без повторной загрузки файла
+        await state.set_state(ScheduleStates.waiting_for_date)
         if "исчерпали квоту" in detail.casefold() or "RESOURCE_EXHAUSTED" in detail:
-            await callback.message.answer(
-                "❌ Лимит Gemini исчерпан на всех ключах пула.\n"
-                "Добавь ключи из других проектов или подожди сброса квоты."
+            text = (
+                "❌ Лимит LLM исчерпан на всех ключах пула.\n"
+                "Подожди сброса или нажми «Повторить»."
+            )
+        elif "validation error" in detail.casefold() or "Field required" in detail:
+            text = (
+                "❌ LLM вернул кривой JSON (нет списка уроков).\n"
+                "Нажми «Повторить» — попробуем другой слот."
             )
         else:
-            await callback.message.answer(
-                "❌ Ошибка при распознавании расписания. Попробуй ещё раз."
-            )
-        await state.clear()
+            short = detail if len(detail) <= 280 else detail[:277] + "…"
+            text = f"❌ Ошибка при распознавании расписания.\n<code>{_esc_html(short)}</code>"
 
+        await callback.message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=parse_retry_keyboard(),
+        )
+
+
+def _esc_html(text: str) -> str:
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+@router.callback_query(F.data == "parse:retry")
+async def handle_parse_retry(
+    callback: CallbackQuery, state: FSMContext, settings: Settings, db: Database
+):
+    data = await state.get_data()
+    if not data.get("image_bytes") or not data.get("selected_class"):
+        await callback.answer("Сессия истекла — отправь файл заново", show_alert=True)
+        await state.clear()
+        return
+
+    selected = parse_iso_date(data.get("selected_date"))
+    if not selected:
+        await callback.answer("Сначала выбери дату", show_alert=True)
+        await _show_calendar(callback, state)
+        return
+
+    await callback.answer("Повторяю…")
+    await _parse_and_preview(
+        callback,
+        state,
+        settings,
+        db,
+        data["selected_class"],
+        data.get("selected_subgroup"),
+        selected,
+    )
+
+
+@router.callback_query(F.data == "parse:change_date")
+async def handle_parse_change_date(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    if not data.get("image_bytes"):
+        await callback.answer("Сессия истекла — отправь файл заново", show_alert=True)
+        await state.clear()
+        return
+    await callback.answer()
+    await _show_calendar(callback, state)
 
 async def _show_review(
     message: Message,

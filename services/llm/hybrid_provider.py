@@ -25,6 +25,7 @@ from services.llm.prompts import (
     wrap_homework_user_text,
 )
 from services.schedule_postprocess import WEEKDAY_RU, day_of_week_from_date
+from services.schedule_normalize import normalize_schedule_payload
 
 logger = logging.getLogger(__name__)
 
@@ -186,14 +187,20 @@ class HybridLLMProvider(LLMProvider):
                 response = await self._gemini_generate(
                     slot, schema=Schedule, prompt=prompt, image_bytes=image_bytes
                 )
-                result = Schedule.model_validate_json(response.text)
+                result = normalize_schedule_payload(
+                    response.text,
+                    class_name=class_name,
+                    schedule_date=schedule_date.isoformat(),
+                    day_of_week=day_of_week,
+                )
             else:
                 raw = await self._openai_chat(slot, prompt=prompt, image_bytes=image_bytes)
-                result = Schedule.model_validate_json(raw)
-            result.class_name = class_name
-            result.date = schedule_date.isoformat()
-            for lesson in result.schedule:
-                lesson.day_of_week = DayOfWeek(day_of_week)
+                result = normalize_schedule_payload(
+                    raw,
+                    class_name=class_name,
+                    schedule_date=schedule_date.isoformat(),
+                    day_of_week=day_of_week,
+                )
             return result
 
         return await self._pool.run_with(

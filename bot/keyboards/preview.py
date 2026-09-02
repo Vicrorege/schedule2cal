@@ -46,3 +46,15 @@ def preview_edit_cancel_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="❌ Отмена правки", callback_data="preview:back")
     return builder.as_markup()
+
+
+def parse_retry_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="🔄 Повторить распознавание", callback_data="parse:retry"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="📅 Другая дата", callback_data="parse:change_date"),
+        InlineKeyboardButton(text="❌ Отмена", callback_data="preview:cancel"),
+    )
+    return builder.as_markup()
