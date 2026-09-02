@@ -16,7 +16,8 @@ from bot.handlers import (
     schedule,
     settings as settings_handlers,
     view_calendar,
-)from bot.keyboards.menu import BOT_COMMANDS
+)
+from bot.keyboards.menu import BOT_COMMANDS
 from bot.middlewares.auth import AuthMiddleware
 from bot.middlewares.database import DatabaseMiddleware
 from bot.middlewares.settings import SettingsMiddleware
