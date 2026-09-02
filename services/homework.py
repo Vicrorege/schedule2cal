@@ -19,12 +19,89 @@ SEARCH_HORIZON_DAYS = 21
 class HomeworkAssignment:
     block: HomeworkBlock
     event: BotCalendarEvent | None
-    status: str  # ok | not_found | ambiguous
+    status: str  # ok | not_found | ambiguous | skipped
     message: str
+
+
+def _normalize_homework_text(text: str) -> str:
+    return " ".join((text or "").casefold().split())
+
+
+def is_same_homework(existing: str | None, new_text: str) -> bool:
+    """True, если на уроке уже записано то же задание."""
+    if not existing or not new_text.strip():
+        return False
+    return _normalize_homework_text(existing) == _normalize_homework_text(new_text)
+
+
+def _make_ok_or_skipped(
+    block: HomeworkBlock,
+    event: BotCalendarEvent,
+    *,
+    local_homework: dict[tuple[str, int], str] | None = None,
+) -> HomeworkAssignment:
+    local_text = None
+    if local_homework:
+        local_text = local_homework.get((event.event_date.isoformat(), event.lesson_number))
+
+    if is_same_homework(event.homework, block.text) or is_same_homework(
+        local_text, block.text
+    ):
+        return HomeworkAssignment(
+            block=block,
+            event=event,
+            status="skipped",
+            message=(
+                f"пропущено — такое же ДЗ уже на "
+                f"{event.event_date.strftime('%d.%m.%Y')} · урок {event.lesson_number}"
+            ),
+        )
+
+    return HomeworkAssignment(
+        block=block,
+        event=event,
+        status="ok",
+        message=(
+            f"{event.subject} · {event.event_date.strftime('%d.%m.%Y')} "
+            f"· урок {event.lesson_number}"
+        ),
+    )
 
 
 def _normalize(text: str) -> str:
     return " ".join(text.casefold().split())
+
+
+def _names_related(a: str, b: str, *, min_ratio: float = 0.86) -> bool:
+    if not a or not b:
+        return False
+    if a == b or a in b or b in a:
+        return True
+    return difflib.SequenceMatcher(None, a, b).ratio() >= min_ratio
+
+
+def _alias_name_forms(text: str, aliases: dict[str, str] | None) -> set[str]:
+    """Исходное имя + кастомный алиас для текста (и наоборот)."""
+    n = _normalize(text)
+    forms: set[str] = {n} if n else set()
+    if not aliases:
+        return forms
+
+    for source, alias in aliases.items():
+        ns = _normalize(source)
+        na = _normalize(alias)
+        hit = _names_related(n, ns) or _names_related(n, na)
+        # кастомное имя внутри SUMMARY вроде «sch 6. math -»
+        if not hit and na and len(na) >= 2 and na in n:
+            hit = True
+        if not hit and ns and len(ns) >= 3 and ns in n:
+            hit = True
+        if hit:
+            if ns:
+                forms.add(ns)
+            if na:
+                forms.add(na)
+    return forms
 
 
 def subject_match_score(
@@ -33,7 +110,7 @@ def subject_match_score(
     *,
     aliases: dict[str, str] | None = None,
 ) -> float:
-    """0..1 насколько query похож на subject из календаря."""
+    """0..1 насколько query похож на subject/алиас/summary из календаря."""
     q = _normalize(query)
     c = _normalize(candidate)
     if not q or not c:
@@ -43,19 +120,25 @@ def subject_match_score(
     if q in c or c in q:
         return 0.92
 
-    aliases = aliases or {}
-    # query может быть алиасом → исходное имя
-    for source, alias in aliases.items():
-        if _normalize(alias) == q and _normalize(source) == c:
-            return 0.98
-        if _normalize(source) == q and _normalize(alias) == c:
-            return 0.98
-        if _normalize(alias) == q and (
-            _normalize(source) in c or c in _normalize(source)
-        ):
-            return 0.9
+    q_forms = _alias_name_forms(query, aliases)
+    c_forms = _alias_name_forms(candidate, aliases)
+    if q_forms & c_forms:
+        return 0.98
 
-    return difflib.SequenceMatcher(None, q, c).ratio()
+    # кастомное имя из словаря встречается в candidate (summary)
+    for qf in q_forms:
+        if qf and len(qf) >= 2 and qf in c:
+            return 0.95
+
+    best = difflib.SequenceMatcher(None, q, c).ratio()
+    for qf in q_forms:
+        for cf in c_forms:
+            if not qf or not cf:
+                continue
+            best = max(best, difflib.SequenceMatcher(None, qf, cf).ratio())
+            if qf in cf or cf in qf:
+                best = max(best, 0.92)
+    return best
 
 
 def next_weekday_on_or_after(start: date, weekday: DayOfWeek) -> date:
@@ -76,6 +159,26 @@ def resolve_block_anchor_date(block: HomeworkBlock, *, today: date) -> date | No
     return None
 
 
+def _event_match_score(
+    subject: str,
+    event: BotCalendarEvent,
+    *,
+    aliases: dict[str, str] | None = None,
+) -> float:
+    """Сравнение ДЗ с исходным предметом, кастомным именем и SUMMARY."""
+    from services.title_template import resolve_lesson_name
+
+    aliases = aliases or {}
+    custom = resolve_lesson_name(event.subject, aliases)
+    scores = [
+        subject_match_score(subject, event.subject, aliases=aliases),
+        subject_match_score(subject, custom, aliases=aliases),
+    ]
+    if event.summary:
+        scores.append(subject_match_score(subject, event.summary, aliases=aliases))
+    return max(scores)
+
+
 def find_best_event_for_subject(
     events: list[BotCalendarEvent],
     subject: str,
@@ -89,6 +192,7 @@ def find_best_event_for_subject(
     Ищет урок предмета.
     - on_date: только этот день
     - иначе: ближайший урок с from_date (по умолчанию сегодня)
+    Учитывает кастомные имена из словаря алиасов.
     """
     scored: list[tuple[float, BotCalendarEvent]] = []
     for event in events:
@@ -98,7 +202,7 @@ def find_best_event_for_subject(
             continue
         if from_date is not None and event.event_date < from_date:
             continue
-        score = subject_match_score(subject, event.subject, aliases=aliases)
+        score = _event_match_score(subject, event, aliases=aliases)
         if score >= min_score:
             scored.append((score, event))
 
@@ -124,6 +228,7 @@ def assign_homework_blocks(
     *,
     today: date,
     aliases: dict[str, str] | None = None,
+    local_homework: dict[tuple[str, int], str] | None = None,
 ) -> list[HomeworkAssignment]:
     results: list[HomeworkAssignment] = []
     for block in blocks:
@@ -161,15 +266,7 @@ def assign_homework_blocks(
                 )
             else:
                 results.append(
-                    HomeworkAssignment(
-                        block=block,
-                        event=event,
-                        status="ok",
-                        message=(
-                            f"{event.subject} · {event.event_date.strftime('%d.%m.%Y')} "
-                            f"· урок {event.lesson_number}"
-                        ),
-                    )
+                    _make_ok_or_skipped(block, event, local_homework=local_homework)
                 )
         else:
             event, status = find_best_event_for_subject(
@@ -189,15 +286,7 @@ def assign_homework_blocks(
                 )
             else:
                 results.append(
-                    HomeworkAssignment(
-                        block=block,
-                        event=event,
-                        status="ok",
-                        message=(
-                            f"{event.subject} · {event.event_date.strftime('%d.%m.%Y')} "
-                            f"· урок {event.lesson_number}"
-                        ),
-                    )
+                    _make_ok_or_skipped(block, event, local_homework=local_homework)
                 )
     return results
 

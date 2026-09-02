@@ -154,6 +154,32 @@ class Database:
                 )
                 """
             )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS day_schedules (
+                    user_id INTEGER NOT NULL,
+                    schedule_date TEXT NOT NULL,
+                    class_name TEXT NOT NULL,
+                    schedule_json TEXT NOT NULL,
+                    extra_schedules_json TEXT NOT NULL DEFAULT '{}',
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, schedule_date)
+                )
+                """
+            )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS lesson_homework (
+                    user_id INTEGER NOT NULL,
+                    schedule_date TEXT NOT NULL,
+                    lesson_number INTEGER NOT NULL,
+                    subject TEXT,
+                    homework_text TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, schedule_date, lesson_number)
+                )
+                """
+            )
             await db.commit()
             await self._migrate(db)
 
@@ -469,4 +495,157 @@ class Database:
                 (user_id,),
             )
             await db.commit()
+
+    async def save_day_schedule(
+        self,
+        user_id: int,
+        *,
+        schedule_date: str,
+        class_name: str,
+        schedule_json: str,
+        extra_schedules_json: str = "{}",
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        async with aiosqlite.connect(self._path) as db:
+            await db.execute(
+                """
+                INSERT INTO day_schedules (
+                    user_id, schedule_date, class_name, schedule_json,
+                    extra_schedules_json, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, schedule_date) DO UPDATE SET
+                    class_name = excluded.class_name,
+                    schedule_json = excluded.schedule_json,
+                    extra_schedules_json = excluded.extra_schedules_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    user_id,
+                    schedule_date,
+                    class_name,
+                    schedule_json,
+                    extra_schedules_json,
+                    now,
+                ),
+            )
+            await db.commit()
+
+    async def get_day_schedule(
+        self, user_id: int, schedule_date: str
+    ) -> dict | None:
+        async with aiosqlite.connect(self._path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT class_name, schedule_json, extra_schedules_json, updated_at
+                FROM day_schedules
+                WHERE user_id = ? AND schedule_date = ?
+                """,
+                (user_id, schedule_date),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                return None
+            return {
+                "class_name": row["class_name"],
+                "schedule_json": row["schedule_json"],
+                "extra_schedules_json": row["extra_schedules_json"],
+                "updated_at": row["updated_at"],
+            }
+
+    async def list_cached_schedule_dates(
+        self, user_id: int, start_date: str, end_date: str
+    ) -> set[str]:
+        async with aiosqlite.connect(self._path) as db:
+            cursor = await db.execute(
+                """
+                SELECT schedule_date FROM day_schedules
+                WHERE user_id = ? AND schedule_date >= ? AND schedule_date <= ?
+                UNION
+                SELECT schedule_date FROM lesson_homework
+                WHERE user_id = ? AND schedule_date >= ? AND schedule_date <= ?
+                """,
+                (user_id, start_date, end_date, user_id, start_date, end_date),
+            )
+            rows = await cursor.fetchall()
+            return {r[0] for r in rows}
+
+    async def save_lesson_homework(
+        self,
+        user_id: int,
+        *,
+        schedule_date: str,
+        lesson_number: int,
+        subject: str | None,
+        homework_text: str,
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        async with aiosqlite.connect(self._path) as db:
+            await db.execute(
+                """
+                INSERT INTO lesson_homework (
+                    user_id, schedule_date, lesson_number, subject,
+                    homework_text, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, schedule_date, lesson_number) DO UPDATE SET
+                    subject = excluded.subject,
+                    homework_text = excluded.homework_text,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    user_id,
+                    schedule_date,
+                    lesson_number,
+                    subject,
+                    homework_text.strip(),
+                    now,
+                ),
+            )
+            await db.commit()
+
+    async def get_day_homework(
+        self, user_id: int, schedule_date: str
+    ) -> dict[int, dict]:
+        """lesson_number -> {subject, homework_text}"""
+        async with aiosqlite.connect(self._path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT lesson_number, subject, homework_text
+                FROM lesson_homework
+                WHERE user_id = ? AND schedule_date = ?
+                ORDER BY lesson_number
+                """,
+                (user_id, schedule_date),
+            )
+            rows = await cursor.fetchall()
+            return {
+                int(r["lesson_number"]): {
+                    "subject": r["subject"],
+                    "homework_text": r["homework_text"],
+                }
+                for r in rows
+            }
+
+    async def list_homework_index(
+        self, user_id: int, start_date: str, end_date: str
+    ) -> dict[tuple[str, int], str]:
+        """(date, lesson_number) -> homework_text для диапазона дат."""
+        async with aiosqlite.connect(self._path) as db:
+            cursor = await db.execute(
+                """
+                SELECT schedule_date, lesson_number, homework_text
+                FROM lesson_homework
+                WHERE user_id = ? AND schedule_date >= ? AND schedule_date <= ?
+                """,
+                (user_id, start_date, end_date),
+            )
+            rows = await cursor.fetchall()
+            return {
+                (str(r[0]), int(r[1])): str(r[2])
+                for r in rows
+                if r[2]
+            }
 

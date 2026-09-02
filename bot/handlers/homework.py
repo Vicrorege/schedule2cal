@@ -55,7 +55,8 @@ def _looks_like_homework(text: str) -> bool:
 def _format_preview(assignments) -> str:
     lines = ["📝 <b>Домашнее задание — превью</b>", ""]
     ok = [a for a in assignments if a.status == "ok" and a.event]
-    fail = [a for a in assignments if a.status != "ok"]
+    skipped = [a for a in assignments if a.status == "skipped"]
+    fail = [a for a in assignments if a.status not in {"ok", "skipped"}]
 
     for a in ok:
         ev = a.event
@@ -69,6 +70,17 @@ def _format_preview(assignments) -> str:
             lines.append(f"   {_esc(hw_line)}")
         lines.append("")
 
+    for a in skipped:
+        ev = a.event
+        assert ev is not None
+        dow = WEEKDAY_RU[day_of_week_from_date(ev.event_date)]
+        lines.append(
+            f"⏭ <b>пропущено</b> · {_esc(ev.subject)} · "
+            f"{ev.event_date.strftime('%d.%m.%Y')} ({dow}) · урок {ev.lesson_number}"
+        )
+        lines.append("   уже записано такое же задание")
+        lines.append("")
+
     for a in fail:
         lines.append(f"⚠️ {_esc(a.message)}")
         lines.append(f"   <i>{_esc(a.block.subject)}</i>: {_esc(a.block.text[:120])}")
@@ -76,8 +88,49 @@ def _format_preview(assignments) -> str:
 
     if ok:
         lines.append("Записать в календарь?")
+    elif skipped and not fail:
+        lines.append("Новых заданий нет — всё уже записано.")
     else:
         lines.append("Нечего записывать — проверь предметы/даты или загрузи расписание.")
+    return "\n".join(lines).rstrip()
+
+
+def _format_write_report(
+    *,
+    written: list[dict],
+    skipped: list[dict],
+    updated: int,
+    sogo_ok: bool,
+    error: str | None = None,
+) -> str:
+    lines: list[str] = []
+    if sogo_ok:
+        lines.append("✅ <b>Домашка — отчёт</b>")
+    else:
+        lines.append("❌ <b>Домашка — отчёт</b>")
+        if error:
+            lines.append(f"<code>{_esc(error)}</code>")
+    lines.append("")
+
+    for item in written:
+        lines.append(
+            f"✅ записано · {_esc(item.get('event_subject') or item.get('subject') or '?')} · "
+            f"{item.get('event_date')} · урок {item.get('lesson_number')}"
+        )
+    for item in skipped:
+        lines.append(
+            f"⏭ пропущено · {_esc(item.get('event_subject') or item.get('subject') or '?')} · "
+            f"{item.get('event_date')} · урок {item.get('lesson_number')}"
+        )
+        lines.append("   уже было такое же задание")
+
+    if written:
+        lines.append("")
+        lines.append(f"Обновлено в SOGo: {updated}")
+        lines.append("💾 Сохранено локально в боте.")
+    elif skipped:
+        lines.append("")
+        lines.append("Новых записей нет.")
     return "\n".join(lines).rstrip()
 
 
@@ -165,8 +218,15 @@ async def handle_plain_homework(
             include_extra=False,
         )
         aliases = await db.get_lesson_aliases(message.from_user.id)
+        local_hw = await db.list_homework_index(
+            message.from_user.id, start.isoformat(), end.isoformat()
+        )
         assignments = assign_homework_blocks(
-            blocks, events, today=today, aliases=aliases
+            blocks,
+            events,
+            today=today,
+            aliases=aliases,
+            local_homework=local_hw,
         )
         if not assignments:
             await status.edit_text("Нечего записывать.")
@@ -219,9 +279,25 @@ async def homework_confirm(callback: CallbackQuery, state: FSMContext, db: Datab
     data = await state.get_data()
     payload = data.get("homework_assignments") or []
     ok_items = [p for p in payload if p.get("status") == "ok" and p.get("uid")]
-    if not ok_items:
+    skipped_items = [p for p in payload if p.get("status") == "skipped"]
+
+    if not ok_items and not skipped_items:
         await callback.answer("Нечего записывать", show_alert=True)
         await state.clear()
+        return
+
+    if not ok_items:
+        await state.clear()
+        await callback.answer()
+        await callback.message.edit_text(
+            _format_write_report(
+                written=[],
+                skipped=skipped_items,
+                updated=0,
+                sogo_ok=True,
+            ),
+            parse_mode="HTML",
+        )
         return
 
     creds = await db.get_caldav_credentials(callback.from_user.id)
@@ -249,14 +325,43 @@ async def homework_confirm(callback: CallbackQuery, state: FSMContext, db: Datab
         assignments.append((event, item["text"]))
 
     result = await asyncio.to_thread(write_homework_to_events, creds, assignments)
+
+    for item in ok_items:
+        try:
+            await db.save_lesson_homework(
+                callback.from_user.id,
+                schedule_date=item["event_date"],
+                lesson_number=int(item["lesson_number"]),
+                subject=item.get("event_subject") or item.get("subject"),
+                homework_text=item["text"],
+            )
+        except Exception:
+            logger.exception("Failed to cache homework locally")
+
     await state.clear()
 
-    if result.ok:
+    written_for_report = ok_items
+    if not result.ok:
+        # локально всё равно сохранили выше
         await callback.message.edit_text(
-            f"✅ Домашка записана в календарь.\nОбновлено событий: {result.updated}"
-        )
-    else:
-        await callback.message.edit_text(
-            f"❌ Не удалось записать ДЗ.\n<code>{_esc(result.error or 'ошибка')}</code>",
+            _format_write_report(
+                written=written_for_report,
+                skipped=skipped_items,
+                updated=0,
+                sogo_ok=False,
+                error=result.error or "ошибка",
+            )
+            + "\n💾 Текст сохранён локально — восстанови через «Записать в SOGo».",
             parse_mode="HTML",
         )
+        return
+
+    await callback.message.edit_text(
+        _format_write_report(
+            written=written_for_report,
+            skipped=skipped_items,
+            updated=result.updated,
+            sogo_ok=True,
+        ),
+        parse_mode="HTML",
+    )

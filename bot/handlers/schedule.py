@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import json
 from datetime import date
 
 from aiogram import F, Router
@@ -1333,6 +1334,24 @@ async def preview_confirm(callback: CallbackQuery, state: FSMContext, db: Databa
     )
 
     if result.ok:
+        try:
+            await db.save_day_schedule(
+                callback.from_user.id,
+                schedule_date=display_schedule.date or schedule.date or "",
+                class_name=display_schedule.class_name,
+                schedule_json=json.dumps(
+                    display_schedule.model_dump(mode="json"), ensure_ascii=False
+                ),
+                extra_schedules_json=json.dumps(
+                    {
+                        name: s.model_dump(mode="json")
+                        for name, s in (extra_schedules or {}).items()
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+        except Exception:
+            logger.exception("Failed to cache day schedule")
         cal_hint = f"\nКалендарь: <code>{result.calendar_url}</code>" if result.calendar_url else ""
         status = (
             f"\n\n✅ <b>Записано в календарь</b>\n"

@@ -56,8 +56,15 @@ def view_calendar_keyboard(
     return builder.as_markup()
 
 
-def view_day_keyboard(selected: date) -> InlineKeyboardMarkup:
+def view_day_keyboard(selected: date, *, can_write: bool = True) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
+    if can_write:
+        builder.row(
+            InlineKeyboardButton(
+                text="📤 Записать в SOGo",
+                callback_data=f"view:write:{selected.year}:{selected.month}:{selected.day}",
+            )
+        )
     builder.row(
         InlineKeyboardButton(
             text="◀️ К календарю",
