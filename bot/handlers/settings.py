@@ -10,6 +10,7 @@ from bot.keyboards.settings import (
     bell_edit_cancel_keyboard,
     bells_keyboard,
     caldav_keyboard,
+    extra_classes_settings_keyboard,
     settings_keyboard,
     template_keyboard,
 )
@@ -45,6 +46,17 @@ async def format_settings_text(db: Database, user_id: int) -> str:
         class_block = "Класс ещё не сохранён."
 
     naming = "вкл" if prefs.custom_naming else "выкл"
+    extras = "вкл" if prefs.extra_classes_enabled else "выкл"
+    extras_list = prefs.extra_classes or []
+    extras_line = (
+        f"➕ Доп. классы: <b>{extras}</b>"
+        + (f" ({len(extras_list)} шт.)" if extras_list else "")
+    )
+    if prefs.extra_classes_enabled and extras_list:
+        extras_line += "\n   " + ", ".join(f"<code>{c}</code>" for c in extras_list[:6])
+        if len(extras_list) > 6:
+            extras_line += f" … +{len(extras_list) - 6}"
+
     creds = await db.get_caldav_credentials(user_id)
     if not creds:
         caldav_line = "📅 CalDAV: <b>не настроен</b>"
@@ -58,6 +70,7 @@ async def format_settings_text(db: Database, user_id: int) -> str:
         f"{class_block}\n\n"
         f"🏷 Шаблон: <code>{prefs.title_template}</code>\n"
         f"📖 Кастомные имена: <b>{naming}</b> ({len(aliases)} шт.)\n"
+        f"{extras_line}\n"
         f"{caldav_line}\n\n"
         "Плейсхолдеры шаблона: <code>{lesson}</code>, <code>{room}</code>, <code>{n}</code>\n"
         "Пример: <code>sch {lesson}|[color=red]</code>"
@@ -95,6 +108,123 @@ async def settings_clear_class(callback: CallbackQuery, db: Database):
         reply_markup=settings_keyboard(prefs),
     )
     await callback.answer("Класс сброшен")
+
+
+@router.callback_query(F.data == "settings:extra_toggle")
+async def settings_extra_toggle(callback: CallbackQuery, db: Database):
+    prefs = await db.get_calendar_prefs(callback.from_user.id)
+    prefs = await db.save_calendar_prefs(
+        callback.from_user.id,
+        extra_classes_enabled=not prefs.extra_classes_enabled,
+    )
+    await callback.message.edit_text(
+        await format_settings_text(db, callback.from_user.id),
+        reply_markup=settings_keyboard(prefs),
+    )
+    await callback.answer(
+        "Доп. классы включены" if prefs.extra_classes_enabled else "Доп. классы выключены"
+    )
+
+
+def _format_extra_classes_settings_text(extra_classes: list[str]) -> str:
+    lines = [
+        "➕ <b>Дополнительные классы</b>",
+        "",
+        "Эти классы подставляются при загрузке расписания "
+        "(если включена галочка «Доп. классы»).",
+        "Их расписание попадёт в описание уроков основного класса.",
+        "",
+    ]
+    if extra_classes:
+        lines.append("Сохранённые:")
+        for name in extra_classes:
+            lines.append(f"• <code>{name}</code>")
+    else:
+        lines.append("Список пуст — добавь названия классов как в расписании.")
+    lines.append("")
+    lines.append("Нажми «Добавить класс» или пришли название текстом.")
+    return "\n".join(lines)
+
+
+@router.callback_query(F.data == "settings:extra_classes")
+async def settings_extra_classes(callback: CallbackQuery, state: FSMContext, db: Database):
+    await state.clear()
+    prefs = await db.get_calendar_prefs(callback.from_user.id)
+    if not prefs.extra_classes_enabled:
+        await callback.answer("Сначала включи «Доп. классы» в настройках", show_alert=True)
+        return
+    extras = prefs.extra_classes or []
+    await callback.message.edit_text(
+        _format_extra_classes_settings_text(extras),
+        parse_mode="HTML",
+        reply_markup=extra_classes_settings_keyboard(extras),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "extra_cfg:add")
+async def extra_cfg_add(callback: CallbackQuery, state: FSMContext, db: Database):
+    prefs = await db.get_calendar_prefs(callback.from_user.id)
+    if not prefs.extra_classes_enabled:
+        await callback.answer("Доп. классы выключены", show_alert=True)
+        return
+    await state.set_state(SettingsStates.adding_extra_class)
+    await callback.message.edit_text(
+        _format_extra_classes_settings_text(prefs.extra_classes or [])
+        + "\n\n✏️ Пришли <b>точное название</b> доп. класса "
+        "(как в таблице расписания).\n"
+        "Пример: <code>10 физико-математический № 2</code>",
+        parse_mode="HTML",
+        reply_markup=extra_classes_settings_keyboard(prefs.extra_classes or []),
+    )
+    await callback.answer()
+
+
+@router.message(SettingsStates.adding_extra_class, F.text)
+async def extra_cfg_add_text(message: Message, state: FSMContext, db: Database):
+    name = (message.text or "").strip()
+    if not name:
+        await message.answer("Нужно название класса.")
+        return
+    prefs = await db.add_extra_class(message.from_user.id, name)
+    await state.clear()
+    await message.answer(
+        _format_extra_classes_settings_text(prefs.extra_classes or [])
+        + f"\n\n✅ Добавлено: <code>{name}</code>",
+        parse_mode="HTML",
+        reply_markup=extra_classes_settings_keyboard(prefs.extra_classes or []),
+    )
+
+
+@router.callback_query(F.data.startswith("extra_cfg:del:"))
+async def extra_cfg_delete(callback: CallbackQuery, db: Database):
+    prefs = await db.get_calendar_prefs(callback.from_user.id)
+    extras = prefs.extra_classes or []
+    idx = int(callback.data.split(":")[2])
+    if idx < 0 or idx >= len(extras):
+        await callback.answer("Класс не найден", show_alert=True)
+        return
+    removed = extras[idx]
+    prefs = await db.remove_extra_class(callback.from_user.id, removed)
+    await callback.message.edit_text(
+        _format_extra_classes_settings_text(prefs.extra_classes or [])
+        + f"\n\n🗑 Удалено: <code>{removed}</code>",
+        parse_mode="HTML",
+        reply_markup=extra_classes_settings_keyboard(prefs.extra_classes or []),
+    )
+    await callback.answer("Удалено")
+
+
+@router.callback_query(F.data == "extra_cfg:clear")
+async def extra_cfg_clear(callback: CallbackQuery, db: Database):
+    prefs = await db.clear_extra_classes(callback.from_user.id)
+    await callback.message.edit_text(
+        _format_extra_classes_settings_text(prefs.extra_classes or [])
+        + "\n\n🧹 Список очищен.",
+        parse_mode="HTML",
+        reply_markup=extra_classes_settings_keyboard(prefs.extra_classes or []),
+    )
+    await callback.answer("Очищено")
 
 
 @router.callback_query(F.data == "settings:naming_toggle")

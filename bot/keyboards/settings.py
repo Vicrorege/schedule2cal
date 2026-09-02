@@ -6,6 +6,7 @@ from db.database import BellPeriod, CalendarPrefs
 
 def settings_keyboard(prefs: CalendarPrefs | None = None) -> InlineKeyboardMarkup:
     naming_on = prefs.custom_naming if prefs else False
+    extras_on = prefs.extra_classes_enabled if prefs else False
     builder = InlineKeyboardBuilder()
     builder.button(text="🔔 Сетка звонков", callback_data="settings:bells")
     builder.button(text="🏷 Шаблон названия", callback_data="settings:template")
@@ -13,10 +14,32 @@ def settings_keyboard(prefs: CalendarPrefs | None = None) -> InlineKeyboardMarku
         text=("✅ Кастомные имена" if naming_on else "☐ Кастомные имена"),
         callback_data="settings:naming_toggle",
     )
+    builder.button(
+        text=("✅ Доп. классы" if extras_on else "☐ Доп. классы"),
+        callback_data="settings:extra_toggle",
+    )
+    if extras_on:
+        builder.button(text="➕ Управление доп. классами", callback_data="settings:extra_classes")
     builder.button(text="📖 Словарь имён", callback_data="settings:aliases")
     builder.button(text="📅 CalDAV / SOGo", callback_data="settings:caldav")
     builder.button(text="🗑 Сбросить класс", callback_data="settings:clear")
     builder.adjust(1)
+    return builder.as_markup()
+
+
+def extra_classes_settings_keyboard(
+    extra_classes: list[str],
+) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for i, name in enumerate(extra_classes):
+        label = name if len(name) <= 50 else name[:47] + "…"
+        builder.button(text=f"🗑 {label}", callback_data=f"extra_cfg:del:{i}")
+    builder.adjust(1)
+    builder.row(
+        InlineKeyboardButton(text="➕ Добавить класс", callback_data="extra_cfg:add"),
+        InlineKeyboardButton(text="🧹 Очистить", callback_data="extra_cfg:clear"),
+    )
+    builder.row(InlineKeyboardButton(text="↩️ К настройкам", callback_data="settings:home"))
     return builder.as_markup()
 
 

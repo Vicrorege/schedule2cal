@@ -5,11 +5,18 @@ from datetime import date
 from openai import AsyncOpenAI
 
 from bot.config import Settings
+from models.homework import HomeworkParseResult
 from models.schedule import ClassList, DayOfWeek, Schedule
 from services.llm.base import LLMProvider
 from services.llm.key_pool import OpenAIEndpointPool
-from services.llm.openai_chat import chat_with_image
-from services.llm.prompts import DETECT_CLASSES_PROMPT, PARSE_SCHEDULE_PROMPT
+from services.llm.openai_chat import chat_with_image, chat_with_text
+from services.llm.prompts import (
+    DETECT_CLASSES_PROMPT,
+    PARSE_HOMEWORK_SYSTEM,
+    PARSE_SCHEDULE_PROMPT,
+    wrap_homework_user_text,
+)
+from services.schedule_postprocess import WEEKDAY_RU, day_of_week_from_date
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +51,6 @@ class OpenAIProvider(LLMProvider):
             proxy=settings.proxy,
             default_model=settings.openai_model,
         )
-        # Кастомные прокси часто не тянут json_schema — json_object надёжнее
         self._use_json_object = any(ep.base_url for ep in endpoints)
         if settings.proxy:
             logger.info("OpenAI-compatible через прокси: %s", settings.proxy)
@@ -129,5 +135,26 @@ class OpenAIProvider(LLMProvider):
             for lesson in result.schedule:
                 lesson.day_of_week = DayOfWeek(day_of_week)
             return result
+
+        return await self._pool.run(_call)
+
+    async def parse_homework(self, text: str, *, today: date) -> HomeworkParseResult:
+        system = PARSE_HOMEWORK_SYSTEM.format(
+            today=today.isoformat(),
+            weekday_ru=WEEKDAY_RU[day_of_week_from_date(today)],
+        )
+        user = wrap_homework_user_text(text)
+        schema = HomeworkParseResult.model_json_schema()
+
+        async def _call(client: AsyncOpenAI, model: str) -> HomeworkParseResult:
+            content = await chat_with_text(
+                client,
+                model,
+                system_prompt=system,
+                user_prompt=user,
+                response_format=self._response_format("homework", schema),
+                json_object_hint=self._use_json_object,
+            )
+            return HomeworkParseResult.model_validate_json(_extract_json(content))
 
         return await self._pool.run(_call)

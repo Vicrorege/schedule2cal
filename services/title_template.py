@@ -4,6 +4,7 @@ import difflib
 from string import Formatter
 
 from models.schedule import Schedule
+from services.schedule_merge import build_calendar_event_plans, format_merged_description_extras
 from db.database import BellPeriod
 
 ALLOWED_PLACEHOLDERS = {"lesson", "room", "n", "number"}
@@ -105,6 +106,7 @@ def format_calendar_events(
     aliases: dict[str, str],
     bells: dict[int, BellPeriod],
     weekday_ru: str | None = None,
+    extra_schedules: dict[str, Schedule] | None = None,
 ) -> str:
     lines: list[str] = ["🗓 <b>События для календаря</b>"]
     if schedule.date:
@@ -122,7 +124,27 @@ def format_calendar_events(
     lines.append(f"Шаблон: <code>{_esc(template)}</code>")
     lines.append("")
 
-    for lesson in sorted(schedule.schedule, key=lambda x: x.lesson_number):
+    plans = build_calendar_event_plans(schedule, extra_schedules)
+    for plan in plans:
+        time_part = "??:??–??:??"
+        if plan.lesson_number in bells:
+            b = bells[plan.lesson_number]
+            time_part = f"{b.start}–{b.end}"
+
+        if plan.is_extra_only:
+            extra_name = plan.extra_class_name or "?"
+            lesson = next(iter(plan.extra_lessons.values()))
+            name = resolve_lesson_name(lesson.subject, aliases)
+            lines.append(f"<b>{plan.lesson_number}.</b> ⏰ {time_part}")
+            lines.append(
+                f"   🔸 <code>ДОП. КЛАСС | {_esc(extra_name)}: {_esc(name)}</code> (private)"
+            )
+            lines.append("")
+            continue
+
+        lesson = plan.main_lesson
+        if not lesson:
+            continue
         name = resolve_lesson_name(lesson.subject, aliases)
         title = apply_title_template(
             template,
@@ -130,12 +152,12 @@ def format_calendar_events(
             room=lesson.room,
             lesson_number=lesson.lesson_number,
         )
-        time_part = "??:??–??:??"
-        if lesson.lesson_number in bells:
-            b = bells[lesson.lesson_number]
-            time_part = f"{b.start}–{b.end}"
-        lines.append(f"<b>{lesson.lesson_number}.</b> ⏰ {time_part}")
+        lines.append(f"<b>{plan.lesson_number}.</b> ⏰ {time_part}")
         lines.append(f"   📌 <code>{_esc(title)}</code>")
+        extras_text = format_merged_description_extras(plan.extra_lessons)
+        if extras_text.strip():
+            for extra_line in extras_text.strip().splitlines():
+                lines.append(f"   <i>{_esc(extra_line)}</i>")
         lines.append("")
 
     return "\n".join(lines).rstrip()

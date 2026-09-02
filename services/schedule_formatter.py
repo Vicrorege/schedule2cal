@@ -1,6 +1,7 @@
 from datetime import date
 
 from models.schedule import Lesson, Schedule, WeekType
+from services.schedule_merge import build_calendar_event_plans, format_extra_lesson_line
 from db.database import BellPeriod
 
 
@@ -40,8 +41,15 @@ def format_schedule_preview(
     bells: dict[int, BellPeriod] | None = None,
     weekday_ru: str | None = None,
     subgroup: int | None = None,
+    extra_schedules: dict[str, Schedule] | None = None,
 ) -> str:
-    header = [f"📚 <b>{_esc(schedule.class_name)}</b>"]
+    header = [f"📚 <b>Основной класс: {_esc(schedule.class_name)}</b>"]
+    extras = extra_schedules or {}
+    if extras:
+        header.append(
+            "➕ Доп. классы: "
+            + ", ".join(_esc(name) for name in sorted(extras))
+        )
     if schedule.date:
         try:
             d = date.fromisoformat(schedule.date)
@@ -59,15 +67,34 @@ def format_schedule_preview(
     header.append("⚠️ <b>Обязательно проверьте расписание</b> — ИИ может ошибаться.")
     header.append("")
 
-    lessons = sorted(schedule.schedule, key=lambda x: x.lesson_number)
-    if not lessons:
+    plans = build_calendar_event_plans(schedule, extras)
+    if not plans:
         header.append("Пусто — уроков не распознано.")
     else:
-        for lesson in lessons:
-            header.append(format_lesson_line(lesson, bells))
+        for plan in plans:
+            if plan.is_extra_only:
+                extra_name = plan.extra_class_name or "?"
+                lesson = next(iter(plan.extra_lessons.values()))
+                header.append(
+                    f"<b>{plan.lesson_number}.</b>  🔸 <b>ДОП. КЛАСС</b> "
+                    f"({_esc(extra_name)})"
+                )
+                header.append(
+                    "   " + _esc(format_extra_lesson_line(extra_name, lesson).lstrip("• "))
+                )
+            else:
+                lesson = plan.main_lesson
+                if lesson:
+                    header.append(format_lesson_line(lesson, bells))
+                    for extra_name in sorted(plan.extra_lessons):
+                        extra_lesson = plan.extra_lessons[extra_name]
+                        header.append(
+                            "   ↳ "
+                            + _esc(format_extra_lesson_line(extra_name, extra_lesson).lstrip("• "))
+                        )
             header.append("")
 
-    header.append(f"📊 Уроков: {len(lessons)}")
+    header.append(f"📊 Событий в календаре: {len(plans)}")
     return "\n".join(header).rstrip()
 
 

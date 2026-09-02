@@ -28,6 +28,7 @@ def calendar_keyboard(
     *,
     selected: date | None = None,
     detected: date | None = None,
+    show_extra_button: bool = False,
 ) -> InlineKeyboardMarkup:
     """Календарь с заголовками дней недели, выделением найденной и выбранной даты."""
     builder = InlineKeyboardBuilder()
@@ -73,6 +74,10 @@ def calendar_keyboard(
     builder.row(
         InlineKeyboardButton(text=confirm_label, callback_data="cal:confirm")
     )
+    if show_extra_button:
+        builder.row(
+            InlineKeyboardButton(text="➕ Доп. классы", callback_data="cal:extra_classes")
+        )
     builder.row(
         InlineKeyboardButton(text="📚 Выбрать другой класс", callback_data="cal:change_class")
     )

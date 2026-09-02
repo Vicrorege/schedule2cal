@@ -9,8 +9,14 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from bot.config import get_settings
-from bot.handlers import common, schedule, settings as settings_handlers
-from bot.keyboards.menu import BOT_COMMANDS
+from bot.handlers import (
+    common,
+    fallback,
+    homework,
+    schedule,
+    settings as settings_handlers,
+    view_calendar,
+)from bot.keyboards.menu import BOT_COMMANDS
 from bot.middlewares.auth import AuthMiddleware
 from bot.middlewares.database import DatabaseMiddleware
 from bot.middlewares.settings import SettingsMiddleware
@@ -56,10 +62,13 @@ async def main():
 
     dp["settings"] = settings
     dp["db"] = database
-    # common (start/help) → settings → schedule
+    # common → settings → schedule → calendar view → homework → fallback
     dp.include_router(common.router)
     dp.include_router(settings_handlers.router)
     dp.include_router(schedule.router)
+    dp.include_router(view_calendar.router)
+    dp.include_router(homework.router)
+    dp.include_router(fallback.router)
 
     await bot.set_my_commands(BOT_COMMANDS)
 

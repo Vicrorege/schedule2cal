@@ -63,3 +63,29 @@ async def chat_with_image(
             raise
 
     raise last_exc  # type: ignore[misc]
+
+
+async def chat_with_text(
+    client: AsyncOpenAI,
+    model: str,
+    *,
+    system_prompt: str,
+    user_prompt: str,
+    response_format: dict,
+    json_object_hint: bool = True,
+) -> str:
+    """OpenAI-compatible text chat с отдельным system-промптом."""
+    system = system_prompt
+    if json_object_hint:
+        system += "\n\nОтветь ТОЛЬКО валидным JSON-объектом, без markdown и пояснений."
+
+    response = await client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_prompt},
+        ],
+        response_format=response_format,
+        temperature=0.0,
+    )
+    return response.choices[0].message.content or ""

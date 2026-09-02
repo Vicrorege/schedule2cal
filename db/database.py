@@ -46,6 +46,12 @@ class CalendarPrefs:
     user_id: int
     title_template: str = "{lesson}"
     custom_naming: bool = False
+    extra_classes_enabled: bool = False
+    extra_classes: list[str] | None = None
+
+    def __post_init__(self):
+        if self.extra_classes is None:
+            self.extra_classes = []
 
 
 @dataclass
@@ -120,6 +126,8 @@ class Database:
                     user_id INTEGER PRIMARY KEY,
                     title_template TEXT NOT NULL DEFAULT '{lesson}',
                     custom_naming INTEGER NOT NULL DEFAULT 0,
+                    extra_classes_enabled INTEGER NOT NULL DEFAULT 0,
+                    extra_classes_json TEXT NOT NULL DEFAULT '[]',
                     updated_at TEXT NOT NULL
                 )
                 """
@@ -147,6 +155,18 @@ class Database:
                 """
             )
             await db.commit()
+            await self._migrate(db)
+
+    async def _migrate(self, db: aiosqlite.Connection) -> None:
+        for stmt in (
+            "ALTER TABLE calendar_prefs ADD COLUMN extra_classes_enabled INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE calendar_prefs ADD COLUMN extra_classes_json TEXT NOT NULL DEFAULT '[]'",
+        ):
+            try:
+                await db.execute(stmt)
+            except Exception:
+                pass
+        await db.commit()
 
     async def get_user_settings(self, user_id: int) -> UserSettings | None:
         async with aiosqlite.connect(self._path) as db:
@@ -248,16 +268,32 @@ class Database:
         async with aiosqlite.connect(self._path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
-                "SELECT title_template, custom_naming FROM calendar_prefs WHERE user_id = ?",
+                """
+                SELECT title_template, custom_naming, extra_classes_enabled, extra_classes_json
+                FROM calendar_prefs WHERE user_id = ?
+                """,
                 (user_id,),
             )
             row = await cursor.fetchone()
             if row is None:
                 return CalendarPrefs(user_id=user_id)
+            extra_raw = row["extra_classes_json"] if "extra_classes_json" in row.keys() else "[]"
+            try:
+                extra_list = json.loads(extra_raw or "[]")
+            except json.JSONDecodeError:
+                extra_list = []
+            if not isinstance(extra_list, list):
+                extra_list = []
+            extra_classes = [str(x).strip() for x in extra_list if str(x).strip()]
+            enabled = False
+            if "extra_classes_enabled" in row.keys():
+                enabled = bool(row["extra_classes_enabled"])
             return CalendarPrefs(
                 user_id=user_id,
                 title_template=row["title_template"] or DEFAULT_TITLE_TEMPLATE,
                 custom_naming=bool(row["custom_naming"]),
+                extra_classes_enabled=enabled,
+                extra_classes=extra_classes,
             )
 
     async def save_calendar_prefs(
@@ -266,25 +302,69 @@ class Database:
         *,
         title_template: str | None = None,
         custom_naming: bool | None = None,
+        extra_classes_enabled: bool | None = None,
+        extra_classes: list[str] | None = None,
     ) -> CalendarPrefs:
         current = await self.get_calendar_prefs(user_id)
         template = title_template if title_template is not None else current.title_template
         naming = current.custom_naming if custom_naming is None else custom_naming
+        extras_enabled = (
+            current.extra_classes_enabled
+            if extra_classes_enabled is None
+            else extra_classes_enabled
+        )
+        extras = current.extra_classes if extra_classes is None else extra_classes
         now = datetime.now(timezone.utc).isoformat()
         async with aiosqlite.connect(self._path) as db:
             await db.execute(
                 """
-                INSERT INTO calendar_prefs (user_id, title_template, custom_naming, updated_at)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO calendar_prefs (
+                    user_id, title_template, custom_naming,
+                    extra_classes_enabled, extra_classes_json, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     title_template = excluded.title_template,
                     custom_naming = excluded.custom_naming,
+                    extra_classes_enabled = excluded.extra_classes_enabled,
+                    extra_classes_json = excluded.extra_classes_json,
                     updated_at = excluded.updated_at
                 """,
-                (user_id, template, int(naming), now),
+                (
+                    user_id,
+                    template,
+                    int(naming),
+                    int(extras_enabled),
+                    json.dumps(extras, ensure_ascii=False),
+                    now,
+                ),
             )
             await db.commit()
-        return CalendarPrefs(user_id=user_id, title_template=template, custom_naming=naming)
+        return CalendarPrefs(
+            user_id=user_id,
+            title_template=template,
+            custom_naming=naming,
+            extra_classes_enabled=extras_enabled,
+            extra_classes=extras,
+        )
+
+    async def add_extra_class(self, user_id: int, class_name: str) -> CalendarPrefs:
+        name = class_name.strip()
+        if not name:
+            return await self.get_calendar_prefs(user_id)
+        current = await self.get_calendar_prefs(user_id)
+        extras = list(current.extra_classes or [])
+        if name not in extras:
+            extras.append(name)
+        return await self.save_calendar_prefs(user_id, extra_classes=extras)
+
+    async def remove_extra_class(self, user_id: int, class_name: str) -> CalendarPrefs:
+        current = await self.get_calendar_prefs(user_id)
+        extras = [c for c in (current.extra_classes or []) if c != class_name]
+        return await self.save_calendar_prefs(user_id, extra_classes=extras)
+
+    async def clear_extra_classes(self, user_id: int) -> CalendarPrefs:
+        return await self.save_calendar_prefs(user_id, extra_classes=[])
 
     async def get_lesson_aliases(self, user_id: int) -> dict[str, str]:
         """source_name (как в расписании) → alias для {lesson}."""

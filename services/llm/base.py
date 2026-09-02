@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from datetime import date
 
+from models.homework import HomeworkParseResult
 from models.schedule import ClassList, Schedule
 
 
@@ -18,3 +19,7 @@ class LLMProvider(ABC):
         day_of_week: str,
     ) -> Schedule:
         """Парсит расписание для указанного класса на конкретную дату."""
+
+    @abstractmethod
+    async def parse_homework(self, text: str, *, today: date) -> HomeworkParseResult:
+        """Разбирает текст домашнего задания на блоки."""

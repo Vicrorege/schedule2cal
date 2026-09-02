@@ -4,10 +4,17 @@ from datetime import date
 from google.genai import types
 
 from bot.config import Settings
+from models.homework import HomeworkParseResult
 from models.schedule import ClassList, DayOfWeek, Schedule
 from services.llm.base import LLMProvider
 from services.llm.key_pool import GeminiKeyPool
-from services.llm.prompts import DETECT_CLASSES_PROMPT, PARSE_SCHEDULE_PROMPT
+from services.llm.prompts import (
+    DETECT_CLASSES_PROMPT,
+    PARSE_HOMEWORK_SYSTEM,
+    PARSE_SCHEDULE_PROMPT,
+    wrap_homework_user_text,
+)
+from services.schedule_postprocess import WEEKDAY_RU, day_of_week_from_date
 
 logger = logging.getLogger(__name__)
 
@@ -76,3 +83,25 @@ class GeminiProvider(LLMProvider):
         for lesson in result.schedule:
             lesson.day_of_week = DayOfWeek(day_of_week)
         return result
+
+    async def parse_homework(self, text: str, *, today: date) -> HomeworkParseResult:
+        system = PARSE_HOMEWORK_SYSTEM.format(
+            today=today.isoformat(),
+            weekday_ru=WEEKDAY_RU[day_of_week_from_date(today)],
+        )
+        user = wrap_homework_user_text(text)
+        prompt = f"{system}\n\n{user}"
+
+        async def _call(client):
+            return await client.aio.models.generate_content(
+                model=self._model,
+                contents=[prompt],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=HomeworkParseResult,
+                    temperature=0.0,
+                ),
+            )
+
+        response = await self._pool.run(_call)
+        return HomeworkParseResult.model_validate_json(response.text)

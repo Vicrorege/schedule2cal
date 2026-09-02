@@ -13,6 +13,7 @@ from bot.keyboards.class_select import (
     class_selection_keyboard,
     subgroup_keyboard,
 )
+from bot.keyboards.extra_classes import extra_classes_keyboard
 from bot.keyboards.preview import (
     preview_delete_keyboard,
     preview_edit_cancel_keyboard,
@@ -133,6 +134,8 @@ async def _process_file(
         if saved:
             matched_class = find_saved_class(saved.class_name, class_list.classes)
 
+        prefs = await db.get_calendar_prefs(message.from_user.id)
+
         await state.update_data(
             classes=class_list.classes,
             saved_class=matched_class,
@@ -141,6 +144,8 @@ async def _process_file(
             selected_date=detected_date.isoformat() if detected_date else None,
             date_source=date_source,
             remember_class=True,
+            extra_classes=[],
+            extra_classes_enabled=prefs.extra_classes_enabled,
         )
 
         # Автопропуск выбора класса, если есть сохранённый и нет ручного режима
@@ -162,10 +167,12 @@ async def _process_file(
             await status_msg.edit_text(
                 f"✅ Класс подставлен: <b>{matched_class}</b>{subgroup_text}"
                 f"{date_line}\n\n"
-                "Перехожу к выбору даты…",
+                "Перехожу к следующему шагу…",
                 parse_mode="HTML",
             )
-            await _show_calendar_message(status_msg, state)
+            await _continue_after_subgroup_message(
+                status_msg, state, db, message.from_user.id
+            )
             return
 
         await state.set_state(ScheduleStates.waiting_for_class)
@@ -247,7 +254,7 @@ async def handle_remember_toggle(callback: CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data == "use_saved")
-async def handle_use_saved(callback: CallbackQuery, state: FSMContext):
+async def handle_use_saved(callback: CallbackQuery, state: FSMContext, db: Database):
     data = await _ensure_session(callback, state)
     if data is None:
         return
@@ -260,7 +267,7 @@ async def handle_use_saved(callback: CallbackQuery, state: FSMContext):
 
     await state.update_data(selected_class=class_name, selected_subgroup=subgroup)
     await callback.answer()
-    await _show_calendar(callback, state)
+    await _continue_after_subgroup(callback, state, db, callback.from_user.id)
 
 
 @router.callback_query(F.data.startswith("cls_page:"))
@@ -311,7 +318,7 @@ async def handle_class_select(callback: CallbackQuery, state: FSMContext, db: Da
 
 
 @router.callback_query(F.data.startswith("subgroup:"))
-async def handle_subgroup_select(callback: CallbackQuery, state: FSMContext):
+async def handle_subgroup_select(callback: CallbackQuery, state: FSMContext, db: Database):
     data = await _ensure_session(callback, state)
     if data is None:
         return
@@ -324,6 +331,185 @@ async def handle_subgroup_select(callback: CallbackQuery, state: FSMContext):
     subgroup_str = callback.data.split(":")[1]
     subgroup = None if subgroup_str == "skip" else int(subgroup_str)
     await state.update_data(selected_subgroup=subgroup)
+    await callback.answer()
+    await _continue_after_subgroup(callback, state, db, callback.from_user.id)
+
+
+def _resolved_extra_classes(
+    saved: list[str],
+    file_classes: list[str],
+    main_class: str,
+) -> list[str]:
+    return [c for c in saved if c in file_classes and c != main_class]
+
+
+async def _continue_after_subgroup(
+    callback: CallbackQuery,
+    state: FSMContext,
+    db: Database,
+    user_id: int,
+):
+    data = await state.get_data()
+    prefs = await db.get_calendar_prefs(user_id)
+    if not prefs.extra_classes_enabled:
+        await _show_calendar(callback, state)
+        return
+
+    main = data.get("selected_class", "")
+    saved = prefs.extra_classes or []
+    file_classes = data.get("classes", [])
+    resolved = _resolved_extra_classes(saved, file_classes, main)
+
+    if resolved:
+        await state.update_data(extra_classes=resolved)
+        await _show_calendar(callback, state)
+        return
+
+    await _show_extra_classes(callback, state)
+
+
+async def _continue_after_subgroup_message(
+    message: Message,
+    state: FSMContext,
+    db: Database,
+    user_id: int,
+):
+    data = await state.get_data()
+    prefs = await db.get_calendar_prefs(user_id)
+    if not prefs.extra_classes_enabled:
+        await _show_calendar_message(message, state)
+        return
+
+    main = data.get("selected_class", "")
+    saved = prefs.extra_classes or []
+    file_classes = data.get("classes", [])
+    resolved = _resolved_extra_classes(saved, file_classes, main)
+
+    if resolved:
+        await state.update_data(extra_classes=resolved)
+        await _show_calendar_message(message, state)
+        return
+
+    await _show_extra_classes_message(message, state)
+
+
+def _extra_class_candidates(data: dict) -> list[str]:
+    main = data.get("selected_class")
+    if not main:
+        return []
+    return [c for c in data.get("classes", []) if c != main]
+
+
+def _extra_classes_keyboard_from_state(data: dict, page: int = 0):
+    return extra_classes_keyboard(
+        data.get("classes", []),
+        main_class=data.get("selected_class", ""),
+        selected=list(data.get("extra_classes") or []),
+        page=page,
+    )
+
+
+def _extra_classes_text(data: dict) -> str:
+    class_name = data.get("selected_class", "")
+    subgroup = data.get("selected_subgroup")
+    selected = list(data.get("extra_classes") or [])
+    candidates = _extra_class_candidates(data)
+
+    lines = [f"📚 Основной класс: <b>{class_name}</b>"]
+    if subgroup:
+        lines.append(f"Подгруппа: {subgroup}")
+    lines.append("")
+    lines.append(
+        "Выбери дополнительные классы — их расписание попадёт "
+        "в описание уроков основного класса."
+    )
+    lines.append(
+        "Если у основного класса окно, а у доп. класса урок — "
+        "создаётся <b>приватное</b> событие с пометкой <b>ДОП. КЛАСС</b>."
+    )
+    lines.append("")
+    if not candidates:
+        lines.append("Других классов в файле нет — нажми «Пропустить».")
+    elif selected:
+        lines.append(f"Выбрано: <b>{', '.join(selected)}</b>")
+    else:
+        lines.append("Можно выбрать несколько или пропустить.")
+    return "\n".join(lines)
+
+
+async def _show_extra_classes(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    await state.set_state(ScheduleStates.waiting_for_extra_classes)
+    await callback.message.edit_text(
+        _extra_classes_text(data),
+        parse_mode="HTML",
+        reply_markup=_extra_classes_keyboard_from_state(data),
+    )
+
+
+async def _show_extra_classes_message(message: Message, state: FSMContext):
+    data = await state.get_data()
+    await state.set_state(ScheduleStates.waiting_for_extra_classes)
+    await message.edit_text(
+        _extra_classes_text(data),
+        parse_mode="HTML",
+        reply_markup=_extra_classes_keyboard_from_state(data),
+    )
+
+
+@router.callback_query(F.data.startswith("extra:toggle:"))
+async def handle_extra_toggle(callback: CallbackQuery, state: FSMContext):
+    data = await _ensure_session(callback, state)
+    if data is None:
+        return
+
+    global_idx = int(callback.data.split(":")[2])
+    candidates = _extra_class_candidates(data)
+    if global_idx < 0 or global_idx >= len(candidates):
+        await callback.answer("Класс не найден", show_alert=True)
+        return
+
+    cls = candidates[global_idx]
+    selected = list(data.get("extra_classes") or [])
+    if cls in selected:
+        selected.remove(cls)
+    else:
+        selected.append(cls)
+    await state.update_data(extra_classes=selected)
+    data["extra_classes"] = selected
+
+    await callback.message.edit_text(
+        _extra_classes_text(data),
+        parse_mode="HTML",
+        reply_markup=_extra_classes_keyboard_from_state(data),
+    )
+    await callback.answer(cls)
+
+
+@router.callback_query(F.data.startswith("extra:page:"))
+async def handle_extra_page(callback: CallbackQuery, state: FSMContext):
+    data = await _ensure_session(callback, state)
+    if data is None:
+        return
+
+    page = int(callback.data.split(":")[2])
+    await callback.message.edit_reply_markup(
+        reply_markup=_extra_classes_keyboard_from_state(data, page=page)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "extra:done")
+async def handle_extra_done(callback: CallbackQuery, state: FSMContext, db: Database):
+    data = await _ensure_session(callback, state)
+    if data is None:
+        return
+
+    selected = list(data.get("extra_classes") or [])
+    prefs = await db.get_calendar_prefs(callback.from_user.id)
+    if prefs.extra_classes_enabled and selected:
+        await db.save_calendar_prefs(callback.from_user.id, extra_classes=selected)
+
     await callback.answer()
     await _show_calendar(callback, state)
 
@@ -338,6 +524,9 @@ def _calendar_text(data: dict) -> str:
     lines = [f"📚 Класс: <b>{class_name}</b>"]
     if subgroup:
         lines.append(f"Подгруппа: {subgroup}")
+    extra_classes = data.get("extra_classes") or []
+    if extra_classes:
+        lines.append(f"➕ Доп. классы: {', '.join(extra_classes)}")
 
     if detected:
         dow = WEEKDAY_RU[day_of_week_from_date(detected)]
@@ -366,7 +555,13 @@ def _calendar_markup(data: dict, year: int | None = None, month: int | None = No
     anchor = selected or detected or date.today()
     y = year if year is not None else anchor.year
     m = month if month is not None else anchor.month
-    return calendar_keyboard(y, m, selected=selected, detected=detected)
+    return calendar_keyboard(
+        y,
+        m,
+        selected=selected,
+        detected=detected,
+        show_extra_button=bool(data.get("extra_classes_enabled")),
+    )
 
 
 async def _show_calendar(callback: CallbackQuery, state: FSMContext):
@@ -433,7 +628,7 @@ async def handle_cal_change_class(callback: CallbackQuery, state: FSMContext):
     if data is None:
         return
 
-    await state.update_data(selected_class=None, selected_subgroup=None)
+    await state.update_data(selected_class=None, selected_subgroup=None, extra_classes=[])
     await state.set_state(ScheduleStates.waiting_for_class)
 
     text = f"✅ Найдено классов: {len(data.get('classes', []))}\n"
@@ -455,6 +650,18 @@ async def handle_cal_change_class(callback: CallbackQuery, state: FSMContext):
         reply_markup=_class_keyboard_from_state(data),
     )
     await callback.answer()
+
+
+@router.callback_query(F.data == "cal:extra_classes")
+async def handle_cal_extra_classes(callback: CallbackQuery, state: FSMContext):
+    data = await _ensure_session(callback, state)
+    if data is None:
+        return
+    if not data.get("extra_classes_enabled"):
+        await callback.answer("Доп. классы выключены в настройках", show_alert=True)
+        return
+    await callback.answer()
+    await _show_extra_classes(callback, state)
 
 
 @router.callback_query(F.data == "cal:confirm")
@@ -509,11 +716,32 @@ async def _parse_and_preview(
         schedule = apply_subgroup(schedule, subgroup)
         schedule.date = schedule_date.isoformat()
 
+        extra_class_names: list[str] = list(data.get("extra_classes") or [])
+        extra_schedules: dict[str, Schedule] = {}
+        for i, extra_name in enumerate(extra_class_names):
+            await callback.message.edit_text(
+                f"⏳ Распознаю расписание на {schedule_date.strftime('%d.%m.%Y')} "
+                f"({WEEKDAY_RU[dow]})…\n"
+                f"Доп. класс <b>{extra_name}</b> ({i + 1}/{len(extra_class_names)})",
+                parse_mode="HTML",
+            )
+            extra_schedule = await llm.parse_schedule(
+                image_bytes,
+                extra_name,
+                schedule_date,
+                dow.value,
+            )
+            extra_schedule.date = schedule_date.isoformat()
+            extra_schedules[extra_name] = extra_schedule
+
         if remember:
             await db.save_user_settings(callback.from_user.id, class_name, subgroup)
 
         await state.update_data(
             schedule_json=schedule.model_dump(mode="json"),
+            extra_schedules_json={
+                name: s.model_dump(mode="json") for name, s in extra_schedules.items()
+            },
             selected_subgroup=subgroup,
             session_aliases={},
             _user_id=callback.from_user.id,
@@ -522,7 +750,14 @@ async def _parse_and_preview(
         prefs = await db.get_calendar_prefs(callback.from_user.id)
         if prefs.custom_naming:
             aliases = await db.get_lesson_aliases(callback.from_user.id)
-            pending = subjects_needing_alias(schedule, aliases)
+            pending: list[str] = []
+            seen_subjects: set[str] = set()
+            for sched in [schedule, *extra_schedules.values()]:
+                for subj in subjects_needing_alias(sched, aliases):
+                    key = subj.casefold()
+                    if key not in seen_subjects:
+                        seen_subjects.add(key)
+                        pending.append(subj)
             if pending:
                 await state.update_data(naming_queue=pending)
                 await state.set_state(ScheduleStates.naming_lessons)
@@ -567,6 +802,7 @@ async def _show_review(
 
     data = await state.get_data()
     bells = await db.get_bells(user_id)
+    extra_schedules = await _load_extra_schedules(state)
     schedule_date = parse_iso_date(schedule.date) or parse_iso_date(data.get("selected_date"))
     weekday_ru = WEEKDAY_RU[day_of_week_from_date(schedule_date)] if schedule_date else None
     await state.update_data(_user_id=user_id)
@@ -576,6 +812,7 @@ async def _show_review(
         bells=bells,
         weekday_ru=weekday_ru,
         subgroup=data.get("selected_subgroup"),
+        extra_schedules=extra_schedules or None,
     )
     markup = preview_keyboard(schedule)
     if edit:
@@ -653,6 +890,12 @@ async def _consume_name(
         await _ask_next_name(message, state, db, user_id, edit=edit)
     else:
         await _show_review(message, state, db, user_id, edit=edit)
+
+
+async def _load_extra_schedules(state: FSMContext) -> dict[str, Schedule]:
+    data = await state.get_data()
+    raw = data.get("extra_schedules_json") or {}
+    return {name: Schedule.model_validate(payload) for name, payload in raw.items()}
 
 
 async def _load_schedule(state: FSMContext) -> Schedule | None:
@@ -769,6 +1012,7 @@ async def preview_confirm(callback: CallbackQuery, state: FSMContext, db: Databa
         return
 
     data = await state.get_data()
+    extra_schedules = await _load_extra_schedules(state)
     bells = await db.get_bells(callback.from_user.id)
     prefs = await db.get_calendar_prefs(callback.from_user.id)
     aliases = await db.get_lesson_aliases(callback.from_user.id)
@@ -785,6 +1029,7 @@ async def preview_confirm(callback: CallbackQuery, state: FSMContext, db: Databa
             aliases=aliases,
             bells=bells,
             weekday_ru=weekday_ru,
+            extra_schedules=extra_schedules or None,
         )
         await callback.message.edit_text(
             preview
@@ -808,14 +1053,17 @@ async def preview_confirm(callback: CallbackQuery, state: FSMContext, db: Databa
         template=prefs.title_template,
         aliases=aliases,
         bells=bells,
+        extra_schedules=extra_schedules or None,
     )
 
+    display_schedule = result.merged_schedule or schedule
     preview = format_calendar_events(
-        schedule,
+        display_schedule,
         template=prefs.title_template,
         aliases=aliases,
         bells=bells,
         weekday_ru=weekday_ru,
+        extra_schedules=extra_schedules or None,
     )
 
     if result.ok:
@@ -930,8 +1178,3 @@ async def preview_edit_save(message: Message, state: FSMContext, db: Database):
     schedule.schedule = new_lessons
     await state.update_data(schedule_json=schedule.model_dump(mode="json"))
     await _show_review(message, state, db, message.from_user.id, edit=False)
-
-
-@router.callback_query()
-async def handle_unknown_callback(callback: CallbackQuery):
-    await callback.answer("Кнопка устарела — отправь файл заново", show_alert=True)
