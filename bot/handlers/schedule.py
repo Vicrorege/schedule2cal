@@ -32,6 +32,7 @@ from services.schedule_postprocess import (
     WEEKDAY_RU,
     apply_subgroup,
     day_of_week_from_date,
+    find_matching_extra_classes,
     find_saved_class,
     is_manual_class_selection,
     parse_caption_date,
@@ -147,7 +148,46 @@ async def _process_file(
             remember_class=True,
             extra_classes=[],
             extra_classes_enabled=prefs.extra_classes_enabled,
+            extra_only_upload=False,
         )
+
+        # Файл только с доп. классом(ами): основной класс уже сохранён, в файле его нет
+        if (
+            prefs.extra_classes_enabled
+            and saved
+            and saved.class_name
+            and not manual
+            and not matched_class
+        ):
+            matched_extras = find_matching_extra_classes(
+                prefs.extra_classes or [],
+                class_list.classes,
+            )
+            if matched_extras:
+                await state.update_data(
+                    selected_class=saved.class_name,
+                    selected_subgroup=saved.subgroup,
+                    extra_classes=matched_extras,
+                    extra_only_upload=True,
+                    remember_class=False,
+                )
+                date_line = ""
+                if detected_date:
+                    dow = WEEKDAY_RU[day_of_week_from_date(detected_date)]
+                    date_line = (
+                        f"\n📅 Дата из {date_source}: "
+                        f"<b>{detected_date.strftime('%d.%m.%Y')}</b> ({dow})"
+                    )
+                extras_text = ", ".join(f"<b>{e}</b>" for e in matched_extras)
+                await status_msg.edit_text(
+                    f"➕ Распознал доп. класс: {extras_text}\n"
+                    f"📚 Основной (куда пишем): <b>{saved.class_name}</b>"
+                    f"{date_line}\n\n"
+                    "Перехожу к выбору даты…",
+                    parse_mode="HTML",
+                )
+                await _show_calendar_message(status_msg, state)
+                return
 
         # Автопропуск выбора класса, если есть сохранённый и нет ручного режима
         if matched_class and not manual:
@@ -523,6 +563,11 @@ def _calendar_text(data: dict) -> str:
     date_source = data.get("date_source") or "документа"
 
     lines = [f"📚 Класс: <b>{class_name}</b>"]
+    if data.get("extra_only_upload"):
+        lines = [
+            f"📚 Основной класс: <b>{class_name}</b>",
+            "➕ Режим: только доп. класс (добавим к уже записанному расписанию)",
+        ]
     if subgroup:
         lines.append(f"Подгруппа: {subgroup}")
     extra_classes = data.get("extra_classes") or []
@@ -708,24 +753,39 @@ async def _parse_and_preview(
 
     try:
         llm = create_llm_provider(settings)
-        schedule = await llm.parse_schedule(
-            image_bytes,
-            class_name,
-            schedule_date,
-            dow.value,
-        )
-        schedule = apply_subgroup(schedule, subgroup)
-        schedule.date = schedule_date.isoformat()
-
+        extra_only = bool(data.get("extra_only_upload"))
         extra_class_names: list[str] = list(data.get("extra_classes") or [])
+
+        if extra_only:
+            # Основной класс уже в календаре — из файла парсим только доп. классы
+            schedule = Schedule(
+                class_name=class_name,
+                date=schedule_date.isoformat(),
+                schedule=[],
+            )
+        else:
+            schedule = await llm.parse_schedule(
+                image_bytes,
+                class_name,
+                schedule_date,
+                dow.value,
+            )
+            schedule = apply_subgroup(schedule, subgroup)
+            schedule.date = schedule_date.isoformat()
+
         extra_schedules: dict[str, Schedule] = {}
         for i, extra_name in enumerate(extra_class_names):
-            await callback.message.edit_text(
-                f"⏳ Распознаю расписание на {schedule_date.strftime('%d.%m.%Y')} "
-                f"({WEEKDAY_RU[dow]})…\n"
-                f"Доп. класс <b>{extra_name}</b> ({i + 1}/{len(extra_class_names)})",
-                parse_mode="HTML",
+            label = (
+                f"⏳ Распознаю доп. класс <b>{extra_name}</b> "
+                f"({i + 1}/{len(extra_class_names)})…"
+                if extra_only
+                else (
+                    f"⏳ Распознаю расписание на {schedule_date.strftime('%d.%m.%Y')} "
+                    f"({WEEKDAY_RU[dow]})…\n"
+                    f"Доп. класс <b>{extra_name}</b> ({i + 1}/{len(extra_class_names)})"
+                )
             )
+            await callback.message.edit_text(label, parse_mode="HTML")
             extra_schedule = await llm.parse_schedule(
                 image_bytes,
                 extra_name,
@@ -735,7 +795,7 @@ async def _parse_and_preview(
             extra_schedule.date = schedule_date.isoformat()
             extra_schedules[extra_name] = extra_schedule
 
-        if remember:
+        if remember and not extra_only:
             await db.save_user_settings(callback.from_user.id, class_name, subgroup)
 
         await state.update_data(

@@ -143,5 +143,20 @@ def find_saved_class(saved: str, detected: list[str]) -> str | None:
     return None
 
 
+def find_matching_extra_classes(
+    saved_extras: list[str],
+    detected: list[str],
+) -> list[str]:
+    """Возвращает названия классов из файла, совпавшие с сохранёнными доп. классами."""
+    matched: list[str] = []
+    seen: set[str] = set()
+    for extra in saved_extras:
+        hit = find_saved_class(extra, detected)
+        if hit and hit.casefold() not in seen:
+            seen.add(hit.casefold())
+            matched.append(hit)
+    return matched
+
+
 def _normalize_class_name(name: str) -> str:
     return re.sub(r"\s+", " ", name.strip().lower())
