@@ -19,8 +19,8 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
-LLM_REQUEST_TIMEOUT_SEC = 30
-LLM_TIMEOUT_COOLDOWN_SEC = 30
+LLM_REQUEST_TIMEOUT_SEC = 12
+LLM_TIMEOUT_COOLDOWN_SEC = 45
 
 _RETRY_IN_RE = re.compile(r"retry in\s+([\d.]+)\s*s", re.IGNORECASE)
 _DAILY_MARKERS = (
@@ -141,10 +141,19 @@ def is_failover_error(exc: BaseException) -> bool:
     if is_quota_error(exc):
         return True
     code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
-    if code in {502, 503, 504}:
+    if code in {500, 502, 503, 504}:
+        return True
+    name = type(exc).__name__
+    if name in {"ServerError", "APIConnectionError", "APITimeoutError", "InternalServerError"}:
         return True
     text = str(exc).upper()
-    return "502 BAD GATEWAY" in text or "503 SERVICE" in text or "504 GATEWAY" in text
+    return (
+        "502 BAD GATEWAY" in text
+        or "503 SERVICE" in text
+        or "504 GATEWAY" in text
+        or "INTERNAL ERROR" in text
+        or "UNAVAILABLE" in text
+    )
 
 
 class KeyCooldownRegistry:

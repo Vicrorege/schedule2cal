@@ -47,6 +47,17 @@ class HybridLLMProvider(LLMProvider):
         self._gemini_pool: GeminiKeyPool | None = None
         self._openai_pool: OpenAIEndpointPool | None = None
 
+        if settings.custom_endpoints:
+            self._openai_pool = OpenAIEndpointPool(
+                settings.custom_endpoints,
+                proxy=settings.proxy,
+                default_model=settings.openai_model,
+                registry=self._registry,
+            )
+            for i, ep in enumerate(settings.custom_endpoints):
+                self._slots.append(_Slot("openai", i, ep.label(), ep.api_key))
+
+        # Нативный Gemini — запасной: free-tier часто таймаутит
         if settings.gemini_native_keys:
             self._gemini_pool = GeminiKeyPool(
                 settings.gemini_native_keys,
@@ -60,16 +71,6 @@ class HybridLLMProvider(LLMProvider):
                     f"generativelanguage.googleapis.com | {settings.gemini_model} | {masked}"
                 )
                 self._slots.append(_Slot("gemini", i, label, key))
-
-        if settings.custom_endpoints:
-            self._openai_pool = OpenAIEndpointPool(
-                settings.custom_endpoints,
-                proxy=settings.proxy,
-                default_model=settings.openai_model,
-                registry=self._registry,
-            )
-            for i, ep in enumerate(settings.custom_endpoints):
-                self._slots.append(_Slot("openai", i, ep.label(), ep.api_key))
 
         if not self._slots:
             raise ValueError("Hybrid pool пуст")
