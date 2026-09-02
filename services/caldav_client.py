@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from urllib.parse import unquote, urlparse
@@ -41,9 +40,31 @@ def class_digest(user_id: int, class_name: str) -> str:
     return hashlib.sha1(f"{user_id}:{class_name}".encode()).hexdigest()[:10]
 
 
-def _make_uid(user_id: int, class_name: str, lesson_number: int, week_type: str) -> str:
+def _make_uid(
+    user_id: int,
+    class_name: str,
+    schedule_date: date,
+    lesson_number: int,
+    week_type: str,
+) -> str:
     digest = class_digest(user_id, class_name)
-    return f"{UID_PREFIX}{digest}_{lesson_number}_{week_type}_{uuid.uuid4().hex[:8]}"
+    return f"{UID_PREFIX}{digest}_{schedule_date.isoformat()}_{lesson_number}_{week_type}"
+
+
+def _date_tag(schedule_date: date) -> str:
+    return f"date:{schedule_date.isoformat()}"
+
+
+def _event_starts_on_date(ical_data: str, schedule_date: date) -> bool:
+    match = re.search(r"DTSTART[^:]*:(\d{8})", ical_data)
+    if not match:
+        return False
+    raw = match.group(1)
+    try:
+        event_date = date(int(raw[:4]), int(raw[4:6]), int(raw[6:8]))
+    except ValueError:
+        return False
+    return event_date == schedule_date
 
 
 def _class_tag(class_name: str) -> str:
@@ -142,13 +163,19 @@ def sync_schedule_to_caldav(
     schedule_date = date.fromisoformat(schedule.date)
     tz = ZoneInfo(tz_name)
     tag = _class_tag(schedule.class_name)
+    date_tag = _date_tag(schedule_date)
     digest = class_digest(user_id, schedule.class_name)
     root = _dav_root(creds.url)
 
     try:
         with DAVClient(url=root, username=creds.username, password=creds.password) as client:
             calendar = _resolve_calendar(client, creds.url)
-            deleted = _delete_bot_events(calendar, class_tag=tag, digest=digest)
+            deleted = _delete_bot_events(
+                calendar,
+                class_tag=tag,
+                digest=digest,
+                schedule_date=schedule_date,
+            )
             created = 0
 
             for lesson in sorted(schedule.schedule, key=lambda x: x.lesson_number):
@@ -166,12 +193,17 @@ def sync_schedule_to_caldav(
                     lesson_number=lesson.lesson_number,
                 )
                 uid = _make_uid(
-                    user_id, schedule.class_name, lesson.lesson_number, lesson.week_type.value
+                    user_id,
+                    schedule.class_name,
+                    schedule_date,
+                    lesson.lesson_number,
+                    lesson.week_type.value,
                 )
 
                 description = (
                     f"Бот-идентификатор: {BOT_MARKER}\n"
                     f"{tag}\n"
+                    f"{date_tag}\n"
                     f"Предмет: {lesson.subject}\n"
                     f"Урок: {lesson.lesson_number}"
                 )
@@ -208,7 +240,14 @@ def sync_schedule_to_caldav(
         return SyncResult(ok=False, error=str(exc))
 
 
-def _delete_bot_events(calendar, *, class_tag: str, digest: str) -> int:
+def _delete_bot_events(
+    calendar,
+    *,
+    class_tag: str,
+    digest: str,
+    schedule_date: date,
+) -> int:
+    """Удаляет только события бота за конкретную дату (повторная загрузка того же дня)."""
     deleted = 0
     try:
         events = calendar.events()
@@ -216,12 +255,21 @@ def _delete_bot_events(calendar, *, class_tag: str, digest: str) -> int:
         logger.exception("Cannot list calendar events")
         return 0
 
-    needle_uid = f"{UID_PREFIX}{digest}_"
+    date_prefix = schedule_date.isoformat()
+    needle_uid = f"{UID_PREFIX}{digest}_{date_prefix}_"
+    date_tag = _date_tag(schedule_date)
     for event in events:
         try:
             data = event.data or ""
-            match = (BOT_MARKER in data and class_tag in data) or (needle_uid in data)
-            if match:
+            is_bot_event = BOT_MARKER in data and class_tag in data
+            if not is_bot_event and needle_uid not in data:
+                continue
+            same_date = (
+                needle_uid in data
+                or date_tag in data
+                or _event_starts_on_date(data, schedule_date)
+            )
+            if is_bot_event and same_date:
                 event.delete()
                 deleted += 1
         except Exception:

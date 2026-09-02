@@ -822,7 +822,7 @@ async def preview_confirm(callback: CallbackQuery, state: FSMContext, db: Databa
         cal_hint = f"\nКалендарь: <code>{result.calendar_url}</code>" if result.calendar_url else ""
         status = (
             f"\n\n✅ <b>Записано в календарь</b>\n"
-            f"Создано: {result.created}, удалено старых: {result.deleted}"
+            f"Создано: {result.created}, заменено за этот день: {result.deleted}"
             f"{cal_hint}"
         )
     else:
